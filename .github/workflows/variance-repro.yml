@@ -1,0 +1,82 @@
+name: Simulation variance reproduction
+on:
+  push:
+    branches: [ci/variance-repro-20261019]
+permissions:
+  contents: read
+  id-token: write
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+  RUSTUP_MAX_RETRIES: 10
+  UV_LOCKED: 1
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        revision:
+          - b9c37db48f04350c20b13b2ccce74589fef17fcd
+          - dd77890aa551d9ff855832c9d3b989c3acb8e792
+        build: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Retain capture harness
+        run: cp scripts/ci-variance.py "$RUNNER_TEMP/ci-variance.py"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.revision }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          version: "0.13.0"
+          checksum: "1468ebd5a5541121837c5a2817b9972ba6090fa6caa3d142620850a47fb75154"
+      - name: Record source and host
+        run: |
+          mkdir -p "$RUNNER_TEMP/variance"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/variance/source.txt"
+          lscpu --json > "$RUNNER_TEMP/variance/cpu.json"
+          uname -a > "$RUNNER_TEMP/variance/kernel.txt"
+          rustup show
+          rustc -vV > "$RUNNER_TEMP/variance/rustc.txt"
+          printf '%s\n' "$ImageOS" "$ImageVersion" > "$RUNNER_TEMP/variance/image.txt"
+      - name: Install requirements and prime cache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsasl2-dev libldap2-dev libkrb5-dev
+          cargo run --locked --bin uv -- venv --cache-dir .cache
+          cargo run --locked --bin uv -- --config-file test/uv.toml pip compile test/requirements/jupyter.in --universal --exclude-newer 2024-08-08 --cache-dir .cache
+          cargo run --locked --bin uv -- --config-file test/uv.toml pip compile test/requirements/airflow.in --universal --exclude-newer 2024-08-08 --cache-dir .cache
+      - name: Build upstream benchmark targets
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          uv run --only-dev cargo codspeed build --locked --profile profiling -p uv-bench
+          find target/codspeed -type f -executable -exec sha256sum {} + > "$RUNNER_TEMP/variance/binaries.sha256"
+          tar -cf - target/codspeed | zstd -T0 -3 -o "$RUNNER_TEMP/variance/binaries.tar.zst"
+      - name: Install pinned simulation runner
+        run: |
+          curl -fsSL https://codspeed.io/v5.2.1/install.sh -o "$RUNNER_TEMP/install-codspeed.sh"
+          echo "86d8419d378b6d9bef644fbde26cdf954526a30331ff1e2f91d7570765d7fd99  $RUNNER_TEMP/install-codspeed.sh" | sha256sum --check
+          bash "$RUNNER_TEMP/install-codspeed.sh" --quiet
+          codspeed --version
+      - name: Repeat full upstream workload
+        env:
+          GH_MATRIX: ${{ toJSON(matrix) }}
+          GH_STRATEGY: ${{ toJSON(strategy) }}
+        run: uv run --no-project "$RUNNER_TEMP/ci-variance.py" "$RUNNER_TEMP/variance" --repetitions 3
+      - name: Archive raw profiles
+        if: always()
+        run: tar -C "$RUNNER_TEMP" -cf - variance | zstd -T0 -3 -o "$RUNNER_TEMP/variance.tar.zst"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: variance-${{ matrix.revision }}-${{ matrix.build }}
+          path: ${{ runner.temp }}/variance.tar.zst
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
