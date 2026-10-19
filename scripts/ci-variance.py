@@ -41,7 +41,11 @@ def summarize(directory, output):
                 elif line.startswith("totals:") and name and "::" in name:
                     values = [int(value) for value in line.split()[1:]]
                     counters = dict(
-                        zip(events, values + [0] * (len(events) - len(values)), strict=True)
+                        zip(
+                            events,
+                            values + [0] * (len(events) - len(values)),
+                            strict=True,
+                        )
                     )
                     if name in results:
                         raise ValueError(f"Duplicate measured benchmark: {name}")
@@ -120,13 +124,22 @@ def capture(output, repetitions, command):
             if base64.b64encode(digest.digest()).decode() != metadata["profileMd5"]:
                 self.send_error(400, "Profile checksum mismatch")
                 return
-            destination = urllib.parse.urlsplit(destinations.pop(sample.name))
+            destination = urllib.parse.urlsplit(destinations[sample.name])
             if destination.scheme != "https":
                 raise ValueError("Expected HTTPS upload destination")
             connection = http.client.HTTPSConnection(destination.netloc, timeout=120)
             try:
                 connection.putrequest("PUT", destination.path + "?" + destination.query)
-                connection.putheader("Content-Type", "application/x-tar")
+                signed_headers = (
+                    urllib.parse.parse_qs(destination.query)
+                    .get("X-Amz-SignedHeaders", ["host"])[0]
+                    .split(";")
+                )
+                for header in {"content-type", "content-md5", *signed_headers} - {
+                    "host"
+                }:
+                    if value := self.headers.get(header):
+                        connection.putheader(header, value)
                 connection.putheader(
                     "Content-Length", str((sample / "profile.tar").stat().st_size)
                 )
@@ -156,6 +169,7 @@ def capture(output, repetitions, command):
             sample = output / f"sample-{repetition:02}"
             sample.mkdir()
             profile = sample / "profiles"
+            profile.mkdir()
             with (sample / "runner.log").open("w") as log:
                 subprocess.run(
                     [
