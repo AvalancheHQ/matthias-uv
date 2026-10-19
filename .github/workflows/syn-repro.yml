@@ -1,0 +1,39 @@
+name: Syn PEP 508 reproduction
+on:
+  push:
+    branches: [ci/syn-pep508-repro-20261019]
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        revision:
+          - b9c37db48f04350c20b13b2ccce74589fef17fcd
+          - dd77890aa551d9ff855832c9d3b989c3acb8e792
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.revision }}
+      - name: Record source and host
+        run: |
+          git rev-parse HEAD
+          lscpu
+          uname -a
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsasl2-dev libldap2-dev libkrb5-dev
+      - name: Install benchmark harness
+        run: cargo install cargo-codspeed --version 5.0.1 --locked
+      - name: Build PEP 508 benchmarks
+        run: cargo codspeed build --locked --profile profiling -p uv-bench --bench uv_pep508
+      - name: Measure PEP 508 benchmarks
+        uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea
+        with:
+          run: cargo codspeed run --bench uv_pep508
+          mode: simulation
+          runner-version: 5.2.1
+          upload-url: https://api.staging.preview.codspeed.io/upload
