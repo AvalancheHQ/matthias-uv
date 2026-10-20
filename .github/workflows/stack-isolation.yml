@@ -1,0 +1,373 @@
+# Frozen-artifact experiment: uv base/head x CodSpeed Rust old/new x Valgrind old/new.
+#
+# The checked-in plan selects build-preflight or measure. The measurement
+# phase references a completed build run and never rebuilds its artifacts.
+#
+# The build workflow deliberately does not upload to CodSpeed: the capture
+# script runs the runner with --skip-upload and keeps local raw profiles.
+name: Stack Isolation
+
+on:
+  push:
+    branches:
+      - ci/uv22754-stack-isolation-20261020
+    paths:
+      - .github/workflows/stack-isolation.yml
+      - scripts/stack-isolation-build.py
+      - scripts/stack-isolation-capture.py
+      - scripts/stack-isolation-plan.json
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: stack-isolation-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  CARGO_TERM_COLOR: always
+  RUSTUP_MAX_RETRIES: "10"
+  UV_LOCKED: "1"
+  UV_BASE_SHA: 21979a0931e931b122c394aeb0bd731e785de30c
+  UV_HEAD_SHA: c2d613f98dac62b4676c2d9b3a5eb3f9b3865ecc
+  VALGRIND_OLD_SHA: e1e4bdf3fa3daa61cce684b513f874ff0735b1b8
+  VALGRIND_NEW_SHA: 5275f9f34b780c8c9320906a14ef6e160d45bf94
+  CODSPEED_RUST_REV: 304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a
+  CODESPEED_RUNNER_VERSION: 5.2.1
+  CODESPEED_RUNNER_SHA256: 932016a307416fd68359a2c5b9b0a6ff822e884fb2549e2e2724b7076da0c3da
+  STACK_ISOLATION_ARTIFACTS: ${{ github.workspace }}/artifacts
+  STACK_ISOLATION_WORKLOAD: ${{ github.workspace }}/workload
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      phase: ${{ steps.plan.outputs.phase }}
+      run-id: ${{ steps.plan.outputs.run-id }}
+      rounds: ${{ steps.plan.outputs.rounds }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - id: plan
+        run: |
+          plan=scripts/stack-isolation-plan.json
+          jq -e '.phase == "build-preflight" or (.phase == "measure" and (.build_run_id | test("^[0-9]+$")))' "$plan"
+          jq -e '.rounds == 2' "$plan"
+          {
+            echo "phase=$(jq -r .phase "$plan")"
+            echo "run-id=$(jq -r .build_run_id "$plan")"
+            echo "rounds=$(jq -r .rounds "$plan")"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: "build ${{ matrix.revision }}-${{ matrix.integration }}"
+    needs: plan
+    if: needs.plan.outputs.phase == 'build-preflight'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - revision: base
+            integration: old
+            snapshot: "true"
+          - revision: head
+            integration: old
+            snapshot: "true"
+          - revision: base
+            integration: new
+            snapshot: "false"
+          - revision: head
+            integration: new
+            snapshot: "false"
+    steps:
+      - name: "Checkout experiment branch"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Free disk space"
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/aws-cli /usr/local/.ghcup /usr/share/swift \
+            /usr/lib/google-cloud-sdk /usr/local/go /usr/local/share/chromium
+          sudo apt-get clean
+          df -h /
+
+      - name: "Install Rust toolchain"
+        run: rustup show
+
+      - name: "Install uv"
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          # renovate: datasource=github-release-attachments depName=astral-sh/uv
+          version: "0.13.0"
+          checksum: "1468ebd5a5541121837c5a2817b9972ba6090fa6caa3d142620850a47fb75154"
+
+      - name: "Install system dependencies"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsasl2-dev libldap2-dev libkrb5-dev zstd
+
+      - name: "Restore Cargo and uv caches"
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/uv
+          key: stack-isolation-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ env.CODSPEED_RUST_REV }}
+          restore-keys: |
+            stack-isolation-cargo-${{ runner.os }}-
+
+      - name: "Materialize pinned workload"
+        run: |
+          args=(
+            sources
+            --artifacts "$STACK_ISOLATION_ARTIFACTS"
+            --workload "$STACK_ISOLATION_WORKLOAD"
+            --git-cache "$RUNNER_TEMP/git"
+            --revision "${{ matrix.revision }}"
+          )
+          if [ "${{ matrix.snapshot }}" = "true" ]; then
+            args+=(--prime-cache --snapshot)
+          fi
+          python3 scripts/stack-isolation-build.py "${args[@]}"
+
+      - name: "Build benchmark binaries"
+        run: |
+          python3 scripts/stack-isolation-build.py binaries \
+            --artifacts "$STACK_ISOLATION_ARTIFACTS" \
+            --workload "$STACK_ISOLATION_WORKLOAD" \
+            --git-cache "$RUNNER_TEMP/git" \
+            --codspeed-source "$RUNNER_TEMP/codspeed-rust" \
+            --revision "${{ matrix.revision }}" \
+            --integration "${{ matrix.integration }}"
+
+      - name: "Reclaim build disk and report artifact sizes"
+        run: |
+          rm -rf "$STACK_ISOLATION_WORKLOAD/target/debug" "$STACK_ISOLATION_WORKLOAD/target/profiling"
+          du -sh "$STACK_ISOLATION_ARTIFACTS"/* || true
+          df -h /
+
+      - name: "Upload build artifacts"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stack-isolation-build-${{ matrix.revision }}-${{ matrix.integration }}
+          path: artifacts
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  valgrind:
+    name: "valgrind ${{ matrix.name }}"
+    needs: plan
+    if: needs.plan.outputs.phase == 'build-preflight'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [old, new]
+    steps:
+      - name: "Checkout experiment branch"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Free disk space"
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/aws-cli /usr/local/.ghcup /usr/share/swift \
+            /usr/lib/google-cloud-sdk /usr/local/go /usr/local/share/chromium
+          sudo apt-get clean
+
+      - name: "Install Valgrind build dependencies"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            automake \
+            autoconf \
+            cmake \
+            libc6-dev \
+            libcap2-bin \
+            gdb \
+            docbook \
+            docbook-xsl \
+            docbook-xml \
+            xsltproc \
+            zstd
+
+      - name: "Build pinned Valgrind"
+        run: |
+          python3 scripts/stack-isolation-build.py valgrind \
+            --artifacts "$STACK_ISOLATION_ARTIFACTS" \
+            --git-cache "$RUNNER_TEMP/git" \
+            --name "${{ matrix.name }}"
+
+      - name: "Upload Valgrind artifacts"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stack-isolation-valgrind-${{ matrix.name }}
+          path: artifacts
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  preflight:
+    name: "preflight A/B/C on base"
+    needs: [plan, build, valgrind]
+    if: needs.plan.outputs.phase == 'build-preflight'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: "Checkout experiment branch"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Free disk space"
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/aws-cli /usr/local/.ghcup /usr/share/swift \
+            /usr/lib/google-cloud-sdk /usr/local/go /usr/local/share/chromium
+          sudo apt-get clean
+          df -h /
+
+      - name: "Install measurement runtime"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libc6-dbg zstd
+          mkdir -p "$RUNNER_TEMP/codspeed-runner"
+          curl -fsSL --retry 3 \
+            -o "$RUNNER_TEMP/codspeed-runner.tar.gz" \
+            "https://github.com/CodSpeedHQ/runner/releases/download/v${CODESPEED_RUNNER_VERSION}/codspeed-runner-x86_64-unknown-linux-musl.tar.gz"
+          echo "${CODESPEED_RUNNER_SHA256}  $RUNNER_TEMP/codspeed-runner.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/codspeed-runner.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/codspeed-runner-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/codspeed-runner-x86_64-unknown-linux-musl/codspeed" --version
+
+      - name: "Install CodSpeed executor tools once"
+        # Capture runs the runner with --skip-setup and swaps in the pinned
+        # Valgrind prefix; this only provisions the ordinary runtime tooling.
+        run: codspeed setup --mode simulation --setup-cache-dir "$RUNNER_TEMP/codspeed-setup"
+
+      - name: "Download build artifacts"
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: stack-isolation-*
+          merge-multiple: true
+          path: artifacts
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.run_id }}
+
+      - name: "Restore archive modes and verify artifacts"
+        run: |
+          python3 scripts/stack-isolation-build.py prepare --artifacts "$STACK_ISOLATION_ARTIFACTS"
+          python3 scripts/stack-isolation-build.py verify --artifacts "$STACK_ISOLATION_ARTIFACTS"
+          rm -f "$STACK_ISOLATION_ARTIFACTS"/sources/*.tar.zst \
+                "$STACK_ISOLATION_ARTIFACTS"/binaries/*.tar.zst \
+                "$STACK_ISOLATION_ARTIFACTS"/valgrind/*.tar.zst
+          df -h /
+
+      - name: "Run preflight capture"
+        run: |
+          python3 scripts/stack-isolation-capture.py \
+            --artifacts "$STACK_ISOLATION_ARTIFACTS" \
+            --output "$GITHUB_WORKSPACE/capture-out/preflight" \
+            --job 0 \
+            --rounds 1 \
+            --preflight
+
+      - name: "Upload preflight capture"
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: capture-preflight
+          path: capture-out
+          compression-level: 0
+          if-no-files-found: warn
+          retention-days: 14
+
+  measure:
+    name: "measure job ${{ matrix.job }}"
+    needs: plan
+    if: needs.plan.outputs.phase == 'measure'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        job: [0, 1, 2, 3, 4]
+    steps:
+      - name: "Checkout experiment branch"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Free disk space"
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/aws-cli /usr/local/.ghcup /usr/share/swift \
+            /usr/lib/google-cloud-sdk /usr/local/go /usr/local/share/chromium
+          sudo apt-get clean
+          df -h /
+
+      - name: "Install measurement runtime"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libc6-dbg zstd
+          mkdir -p "$RUNNER_TEMP/codspeed-runner"
+          curl -fsSL --retry 3 \
+            -o "$RUNNER_TEMP/codspeed-runner.tar.gz" \
+            "https://github.com/CodSpeedHQ/runner/releases/download/v${CODESPEED_RUNNER_VERSION}/codspeed-runner-x86_64-unknown-linux-musl.tar.gz"
+          echo "${CODESPEED_RUNNER_SHA256}  $RUNNER_TEMP/codspeed-runner.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/codspeed-runner.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/codspeed-runner-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/codspeed-runner-x86_64-unknown-linux-musl/codspeed" --version
+
+      - name: "Install CodSpeed executor tools once"
+        run: codspeed setup --mode simulation --setup-cache-dir "$RUNNER_TEMP/codspeed-setup"
+
+      - name: "Download build artifacts"
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: stack-isolation-*
+          merge-multiple: true
+          path: artifacts
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ needs.plan.outputs.run-id }}
+
+      - name: "Restore archive modes and verify artifacts"
+        run: |
+          python3 scripts/stack-isolation-build.py prepare --artifacts "$STACK_ISOLATION_ARTIFACTS"
+          python3 scripts/stack-isolation-build.py verify --artifacts "$STACK_ISOLATION_ARTIFACTS"
+          rm -f "$STACK_ISOLATION_ARTIFACTS"/sources/*.tar.zst \
+                "$STACK_ISOLATION_ARTIFACTS"/binaries/*.tar.zst \
+                "$STACK_ISOLATION_ARTIFACTS"/valgrind/*.tar.zst
+          df -h /
+
+      - name: "Run measurement"
+        run: |
+          python3 scripts/stack-isolation-capture.py \
+            --artifacts "$STACK_ISOLATION_ARTIFACTS" \
+            --output "$GITHUB_WORKSPACE/capture-out/job-${{ matrix.job }}" \
+            --job "${{ matrix.job }}" \
+            --rounds "${{ needs.plan.outputs.rounds }}"
+
+      - name: "Upload measurement capture"
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: capture-job-${{ matrix.job }}
+          path: capture-out
+          compression-level: 0
+          if-no-files-found: warn
+          retention-days: 14
