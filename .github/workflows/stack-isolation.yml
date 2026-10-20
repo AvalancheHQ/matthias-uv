@@ -3,6 +3,12 @@
 # The checked-in plan selects build-preflight or measure. The measurement
 # phase references a completed build run and never rebuilds its artifacts.
 #
+# Measurement is 60 hosted-VM jobs (0..59), each running the suite exactly
+# once; job % 6 picks the cell and job // 6 the replicate. max-parallel only
+# bounds concurrent VMs, so it does not batch samples. Hosted runners may share
+# a physical machine, so manifests record observable runner identity only.
+# The preflight job is a 3-cell setup diagnostic and is not one of the 60.
+#
 # The build workflow deliberately does not upload to CodSpeed: the capture
 # script runs the runner with --skip-upload and keeps local raw profiles.
 name: Stack Isolation
@@ -47,7 +53,7 @@ jobs:
     outputs:
       phase: ${{ steps.plan.outputs.phase }}
       run-id: ${{ steps.plan.outputs.run-id }}
-      rounds: ${{ steps.plan.outputs.rounds }}
+      jobs: ${{ steps.plan.outputs.jobs }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -56,11 +62,13 @@ jobs:
         run: |
           plan=scripts/stack-isolation-plan.json
           jq -e '.phase == "build-preflight" or (.phase == "measure" and (.build_run_id | test("^[0-9]+$")))' "$plan"
-          jq -e '.rounds == 2' "$plan"
+          # Exactly the 60 measurement jobs; each matrix job gets its own VM
+          # and runs the suite once, so there is no round/execution batching.
+          jq -e '.measurement_jobs == [range(0; 60)]' "$plan"
           {
             echo "phase=$(jq -r .phase "$plan")"
             echo "run-id=$(jq -r .build_run_id "$plan")"
-            echo "rounds=$(jq -r .rounds "$plan")"
+            echo "jobs=$(jq -c .measurement_jobs "$plan")"
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -220,6 +228,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # Setup diagnostic only: one base-config run per config cell. Excluded from
+  # the 60 measurement jobs and their cohort coverage.
   preflight:
     name: "preflight A/B/C on base"
     needs: [plan, build, valgrind]
@@ -282,7 +292,6 @@ jobs:
             --artifacts "$STACK_ISOLATION_ARTIFACTS" \
             --output "$GITHUB_WORKSPACE/capture-out/preflight" \
             --job 0 \
-            --rounds 1 \
             --preflight
 
       - name: "Upload preflight capture"
@@ -303,9 +312,11 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
+      # One job per fresh hosted VM; max-parallel only caps how many VMs run
+      # at once, each job still executes the suite exactly once.
       max-parallel: 5
       matrix:
-        job: [0, 1, 2, 3, 4]
+        job: ${{ fromJSON(needs.plan.outputs.jobs) }}
     steps:
       - name: "Checkout experiment branch"
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -359,8 +370,7 @@ jobs:
           python3 scripts/stack-isolation-capture.py \
             --artifacts "$STACK_ISOLATION_ARTIFACTS" \
             --output "$GITHUB_WORKSPACE/capture-out/job-${{ matrix.job }}" \
-            --job "${{ matrix.job }}" \
-            --rounds "${{ needs.plan.outputs.rounds }}"
+            --job "${{ matrix.job }}"
 
       - name: "Upload measurement capture"
         if: always()

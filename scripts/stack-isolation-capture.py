@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Measure frozen uv benchmark artifacts with pinned Valgrind builds."""
+"""Measure frozen uv benchmark artifacts with pinned Valgrind builds.
+
+Each measurement job runs the frozen benchmark suite exactly once on a fresh
+GitHub-hosted VM. Jobs 0..59 are fixed by the checked-in plan: job % 6 selects
+one of the six (config, revision) cells and job // 6 is the replicate round
+(ten runs per cell). Hosted runners can share physical hosts, so captured
+runner/host identities are provenance only; comparisons are independent and
+must never be paired by replicate or job.
+"""
 
 import argparse
 import hashlib
@@ -23,9 +31,9 @@ VALGRIND_REVISIONS = {
 }
 RUST_REVISION = "304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a"
 VALGRIND_PREFIX = Path("/opt/stack-isolation/valgrind")
+# A base, A head, B base, B head, C base, C head: one cell per job % 6.
 CELLS = [(config, revision) for config in "ABC" for revision in REVISIONS]
-# Williams ordering balances immediate predecessors over the first six rounds.
-BALANCED_ORDER = (0, 1, 5, 2, 4, 3)
+MEASUREMENT_JOB_COUNT = 60
 COUNTERS = ("Ct", "Cl", "Dr", "Dw", "D1mr", "D1mw", "DLmr", "DLmw", "ILmr")
 CPU_HZ = 3_600_000_000
 L1_CYCLES = 5
@@ -102,17 +110,16 @@ def summarize(directory):
     return results
 
 
-def schedule(job, rounds, preflight):
+def schedule(job, preflight):
+    # Preflight exercises the three base cells once as a setup diagnostic; it
+    # is not one of the 60 measurement jobs.
     if preflight:
         return [(0, position, config, "base") for position, config in enumerate("ABC")]
-    rows = []
-    for local_round in range(rounds):
-        global_round = job * rounds + local_round
-        order = [(index + global_round) % len(CELLS) for index in BALANCED_ORDER]
-        if global_round >= len(CELLS):
-            order.reverse()
-        rows.extend((local_round, position, *CELLS[index]) for position, index in enumerate(order))
-    return rows
+    if not 0 <= job < MEASUREMENT_JOB_COUNT:
+        raise ValueError(f"measurement job must be in [0, {MEASUREMENT_JOB_COUNT - 1}], got {job}")
+    config, revision = CELLS[job % len(CELLS)]
+    # One fresh hosted VM per job: exactly one sample, at order 0.
+    return [(job // len(CELLS), 0, config, revision)]
 
 
 def output_of(command):
@@ -167,8 +174,8 @@ def capture(args):
         raise ValueError(f"Unexpected runner: {runner_version}")
     cpu = json.loads(output_of(["lscpu", "--json"]))
     cpu_model = next(row["data"] for row in cpu["lscpu"] if row["field"] == "Model name:")
-    plan = schedule(args.job, args.rounds, args.preflight)
-    save(output / "schedule.json", [dict(round=r, order=o, config=c, revision=v) for r, o, c, v in plan])
+    plan = schedule(args.job, args.preflight)
+    save(output / "schedule.json", [dict(job=args.job, round=r, order=o, cell=CELLS.index((c, v)), config=c, revision=v) for r, o, c, v in plan])
     expected_names = None
     expected_targets = None
     failures = []
@@ -184,6 +191,7 @@ def capture(args):
             "job": args.job,
             "round": round_number,
             "order": position,
+            "cell": CELLS.index((config, revision)),
             "preflight": args.preflight,
             "config": config,
             "revision": revision,
@@ -196,6 +204,13 @@ def capture(args):
             "glibc": output_of(["getconf", "GNU_LIBC_VERSION"]),
             "runner_version": runner_version,
             "runner_sha256": digest(runner),
+            # Observable identity only: GitHub-hosted runners do not guarantee
+            # that separate jobs land on distinct physical machines.
+            "runner_name": os.environ.get("RUNNER_NAME"),
+            "runner_environment": os.environ.get("RUNNER_ENVIRONMENT"),
+            "runner_os": os.environ.get("RUNNER_OS"),
+            "runner_arch": os.environ.get("RUNNER_ARCH"),
+            "hostname": platform.node() or None,
             "image_os": os.environ.get("ImageOS"),
             "image_version": os.environ.get("ImageVersion"),
             "workflow_url": f"https://github.com/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')}",
@@ -282,12 +297,21 @@ def capture(args):
         raise RuntimeError("\n".join(failures))
 
 
+def job_id(value):
+    try:
+        job = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"measurement job must be an integer, got {value!r}") from error
+    if not 0 <= job < MEASUREMENT_JOB_COUNT:
+        raise argparse.ArgumentTypeError(f"measurement job must be in [0, {MEASUREMENT_JOB_COUNT - 1}], got {job}")
+    return job
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--job", type=int, default=0)
-    parser.add_argument("--rounds", type=int, default=2)
+    parser.add_argument("--job", type=job_id, default=0)
     parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args()
     capture(args)
