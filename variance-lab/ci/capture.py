@@ -122,8 +122,18 @@ def machine_identity() -> dict:
     }
 
 
-def write_run_script(path: Path, targets: list[Path], candidate: dict) -> None:
-    wrapper = " ".join(shlex.quote(str(part)) for part in candidate.get("wrapper", []))
+def expand_lab_dir(value: str, lab: Path) -> str:
+    return value.replace("$VARIANCE_LAB_DIR", str(lab))
+
+
+def write_run_script(path: Path, targets: list[Path], candidate: dict, lab: Path) -> None:
+    parts = [expand_lab_dir(str(part), lab) for part in candidate.get("wrapper", [])]
+    for part in parts:
+        if part.startswith("LD_PRELOAD="):
+            for library in part.removeprefix("LD_PRELOAD=").replace(":", " ").split():
+                if not Path(library).is_file():
+                    raise ValueError(f"LD_PRELOAD object does not exist on this runner: {library}")
+    wrapper = " ".join(shlex.quote(part) for part in parts)
     env_mode = candidate.get("env_mode", "inherit")
     if env_mode not in ("inherit", "fixed"):
         raise ValueError(f"unknown env_mode {env_mode!r}")
@@ -239,7 +249,7 @@ def capture(args) -> None:
         manifest["setup_commands"] = setup_log
 
         run_script = workload / "run-lab-suite.sh"
-        write_run_script(run_script, targets, candidate)
+        write_run_script(run_script, targets, candidate, lab)
         command = [
             str(runner),
             "run",
@@ -278,6 +288,18 @@ def capture(args) -> None:
         absent = [name for name in required if not any(uri.endswith("::" + name) for uri in results)]
         if absent:
             raise ValueError(f"Required benchmarks missing from profiles: {absent}")
+        # Candidates that inject code (LD_PRELOAD) must prove it reached the benchmark
+        # processes: callgrind names every object that executed collected instructions.
+        # Presence per benchmark is recorded; absence everywhere fails the run.
+        for needle in candidate.get("required_profile_substrings", []):
+            missing_in = []
+            for name in required:
+                _, result = next((u, r) for u, r in results.items() if u.endswith("::" + name))
+                if needle not in (profiles / result["file"]).read_text(errors="replace"):
+                    missing_in.append(name)
+            manifest.setdefault("profile_substring_missing", {})[needle] = missing_in
+            if len(missing_in) == len(required):
+                raise ValueError(f"{needle!r} not present in any required benchmark profile")
         if hash_tree(VALGRIND_PREFIX) != valgrind_hashes:
             raise ValueError("Valgrind installation changed during measurement")
         manifest.update(status="success", benchmark_count=len(results), measured_process_count=len({r["pid"] for r in results.values()}))

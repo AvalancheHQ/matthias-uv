@@ -15,7 +15,7 @@
     "env": {},
     "wrapper": [
       "env",
-      "LD_PRELOAD=/home/runner/work/matthias-uv/matthias-uv/variance-lab/ci/detshim.so",
+      "LD_PRELOAD=$VARIANCE_LAB_DIR/detshim.so",
       "DETSHIM=clock,random"
     ],
     "runner_args": [],
@@ -34,6 +34,9 @@
       "unpack_sdist_many_files",
       "discover_workspace_from_all_members",
       "discover_workspace_from_all_members_with_excludes"
+    ],
+    "required_profile_substrings": [
+      "detshim.so"
     ]
   },
   "runs": [
@@ -67,5 +70,5 @@
     "name": "stack-isolation-valgrind-new",
     "mode": "reuse"
   },
-  "nonce": "20261020T225400Z"
+  "nonce": "20261020T231334Z"
 }
