@@ -144,11 +144,13 @@ def summarize(directory):
 WARMUP_LINE = re.compile(r"^Measured: (?P<uri>\S+)(?: \(group: [^)]*\))? \(warmup: (?P<iterations>\d+) iterations\)$")
 
 
-def attach_warmup_iterations(results, runner_log):
+def attach_warmup_iterations(results, runner_log, required):
     """Record how many unmeasured iterations preceded each measured one.
 
-    Only the warm integration prints the count; benchmarks without a line keep
-    no entry so the report can tell "not reported" from a count.
+    Only the warm integration prints the count (``required``); benchmarks
+    without a line keep no entry so the report can tell "not reported" from a
+    count. A warm suite without any count means the binaries were not built
+    from the warm integration, which a hash check cannot tell apart.
     """
     counts = {}
     with runner_log.open(errors="replace") as stream:
@@ -164,6 +166,8 @@ def attach_warmup_iterations(results, runner_log):
         if uri not in results:
             raise ValueError(f"Warmup line for unmeasured benchmark {uri}")
         results[uri]["warmup_iterations"] = iterations
+    if required and not counts:
+        raise ValueError("Warm integration printed no warmup iteration counts")
     if counts and len(counts) != len(results):
         raise ValueError(
             f"Warmup counts for {len(counts)} of {len(results)} measured benchmarks"
@@ -408,7 +412,9 @@ def capture(args):
                 )
             manifest["measurement_duration_seconds"] = time.monotonic() - measured_start
             results = summarize(profiles)
-            attach_warmup_iterations(results, sample / "runner.log")
+            attach_warmup_iterations(
+                results, sample / "runner.log", required=integration == "warm"
+            )
             save(sample / "results.json", results)
             names = set(results)
             if len(names) != EXPECTED_BENCHMARK_COUNT:

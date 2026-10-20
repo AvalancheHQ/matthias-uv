@@ -321,6 +321,35 @@ def copy_targets(artifacts: Path, workload: Path, revision: str, integration: st
     shutil.rmtree(destination)
 
 
+def cargo_tree_inverse(workload: Path, env: dict, crate: str) -> str:
+    """`cargo tree -i <crate>` stdout only.
+
+    stderr is kept apart on purpose: cargo's "patch ... was not used in the
+    crate graph" warning quotes the patched revision, so a merged stream would
+    make a substring check pass exactly when the patch was ignored.
+    """
+    command = ["cargo", "tree", "-i", crate]
+    log(f"$ {shlex.join(command)}  (cwd={workload})")
+    completed = subprocess.run(
+        command, cwd=workload, env=env, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    if completed.returncode != 0:
+        raise SystemExit(f"command failed ({completed.returncode}): {shlex.join(command)}\n{completed.stderr}")
+    if "was not used in the crate graph" in completed.stderr:
+        raise SystemExit(f"[patch.crates-io] ignored by cargo:\n{completed.stderr}")
+    return completed.stdout
+
+
+def expect_patched(tree: str, crate: str, revision: str) -> None:
+    """The inverse tree must root at the git-sourced crate, not a registry one."""
+    root = tree.splitlines()[0] if tree else ""
+    expected = f"{crate} v"
+    source = f"({CODSPEED_RUST_URL}?rev={revision}#"
+    if not (root.startswith(expected) and source in root):
+        raise SystemExit(f"{crate} is not built from {CODSPEED_RUST_URL}@{revision}:\n{tree}")
+
+
+
 def cmd_binaries(args) -> None:
     artifacts = args.artifacts.resolve()
     workload = args.workload.resolve()
@@ -384,24 +413,27 @@ def cmd_binaries(args) -> None:
         try:
             manifest.write_text(original.rstrip() + "\n" + patch)
             env_new = dict(env, PATH=f"{tools_root / 'bin'}:{env['PATH']}")
-            # No --locked: adding [patch.crates-io] necessarily re-resolves the
-            # patched crates; the resulting lockfile is retained as an artifact.
-            run(["cargo", "metadata", "--format-version", "1"], cwd=workload, env=env_new, capture=True)
+            # A [patch.crates-io] entry is only used when the lockfile selects
+            # its version. The locked registry 5.0.2 satisfies uv's `5.0.1`
+            # requirement, so a patch at any other version is silently ignored
+            # ("patch ... was not used in the crate graph"). Re-lock exactly
+            # the patched crates so the lockfile moves them to the git source;
+            # the resulting lockfile is retained as an artifact.
+            run(
+                ["cargo", "update", "-p", "codspeed-criterion-compat", "-p", "codspeed"],
+                cwd=workload,
+                env=env_new,
+            )
             run(
                 [cargo_codspeed, "build", "--locked", "--profile", "profiling", "-p", "uv-bench"],
                 cwd=workload,
                 env=env_new,
             )
-            tree = run(
-                ["cargo", "tree", "-i", "codspeed-criterion-compat"], cwd=workload, env=env_new, capture=True
-            )
-            if codspeed_rust_rev not in tree:
-                raise SystemExit(f"codspeed patch did not take effect:\n{tree}")
-            (artifacts / f"cargo-tree-codspeed-{revision}-{integration}.txt").write_text(tree)
-            tree_codspeed = run(["cargo", "tree", "-i", "codspeed"], cwd=workload, env=env_new, capture=True)
-            if codspeed_rust_rev not in tree_codspeed:
-                raise SystemExit(f"codspeed core patch did not take effect:\n{tree_codspeed}")
-            (artifacts / f"cargo-tree-codspeed-core-{revision}-{integration}.txt").write_text(tree_codspeed)
+            for crate in ("codspeed-criterion-compat", "codspeed"):
+                tree = cargo_tree_inverse(workload, env_new, crate)
+                expect_patched(tree, crate, codspeed_rust_rev)
+                suffix = "" if crate == "codspeed-criterion-compat" else "-core"
+                (artifacts / f"cargo-tree-codspeed{suffix}-{revision}-{integration}.txt").write_text(tree)
             metadata["extra"] = {"codspeed_rust_path": str(codspeed_src), "patch_crates_io": True}
             lockfile = (artifacts / f"locks/{revision}-{integration}-Cargo.lock")
             lockfile.parent.mkdir(parents=True, exist_ok=True)
