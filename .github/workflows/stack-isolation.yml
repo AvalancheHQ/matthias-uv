@@ -1,6 +1,6 @@
-# Frozen A/B Simulation: one full suite per macro job, 20 jobs per cell.
-# Four separate preflights are excluded from measurement. Frozen build
-# artifacts are reused; raw captures are retained without CodSpeed uploads.
+# Frozen A/B/C Simulation top-up: 130 full-suite macro jobs.
+# Reuse the original 80 A/B runs to reach 35 observations per cell.
+# Two C preflights are excluded; all executable and Valgrind artifacts are reused.
 name: Stack Isolation
 
 on:
@@ -52,7 +52,7 @@ jobs:
         run: |
           plan=scripts/stack-isolation-plan.json
           jq -e '.phase == "build-preflight" or ((.phase == "preflight" or .phase == "measure") and (.build_run_id | test("^[0-9]+$")))' "$plan"
-          jq -e '.measurement_jobs == [range(0; 80)]' "$plan"
+          jq -e '.measurement_jobs == [range(80; 210)]' "$plan"
           {
             echo "phase=$(jq -r .phase "$plan")"
             echo "run-id=$(jq -r .build_run_id "$plan")"
@@ -216,7 +216,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # Preflight samples are excluded from the 80-job measurement matrix.
+  # C base/head preflights are excluded from the 130-job measurement matrix.
   preflight:
     name: "preflight job ${{ matrix.job }}"
     needs: [plan, build, valgrind]
@@ -232,7 +232,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        job: [0, 20, 40, 60]
+        job: [140, 175]
     steps:
       - name: "Checkout experiment branch"
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -296,7 +296,7 @@ jobs:
           path: capture-out
           compression-level: 0
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 90
 
   measure:
     name: "measure job ${{ matrix.job }}"
@@ -370,4 +370,4 @@ jobs:
           path: capture-out
           compression-level: 0
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 90

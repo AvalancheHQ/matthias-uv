@@ -27,10 +27,18 @@ VALGRIND_REVISIONS = {
 }
 RUST_REVISION = "304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a"
 VALGRIND_PREFIX = Path("/opt/stack-isolation/valgrind")
-CELLS = [(config, revision) for config in "AB" for revision in REVISIONS]
-RUNS_PER_CELL = 20
-MEASUREMENT_JOB_COUNT = RUNS_PER_CELL * len(CELLS)
+CELLS = [(config, revision) for config in "ABC" for revision in REVISIONS]
+RUNS_PER_CELL = 35
+REUSED_RUNS_PER_CONFIG = {"A": 20, "B": 20, "C": 0}
+FIRST_MEASUREMENT_JOB = sum(REUSED_RUNS_PER_CONFIG[config] for config, _ in CELLS)
+MEASUREMENTS = [
+    (round_number, 0, config, revision)
+    for config, revision in CELLS
+    for round_number in range(REUSED_RUNS_PER_CONFIG[config], RUNS_PER_CELL)
+]
+MEASUREMENT_JOB_COUNT = FIRST_MEASUREMENT_JOB + len(MEASUREMENTS)
 EXPECTED_BENCHMARK_COUNT = 68
+SHARED_PROCESS_COUNT = 6
 COUNTERS = ("Ct", "Cl", "Dr", "Dw", "D1mr", "D1mw", "DLmr", "DLmw", "ILmr")
 CPU_HZ = 3_600_000_000
 L1_CYCLES = 5
@@ -114,12 +122,11 @@ def summarize(directory):
 
 
 def schedule(job):
-    if not 0 <= job < MEASUREMENT_JOB_COUNT:
+    if not FIRST_MEASUREMENT_JOB <= job < MEASUREMENT_JOB_COUNT:
         raise ValueError(
-            f"measurement job must be in [0, {MEASUREMENT_JOB_COUNT - 1}], got {job}"
+            f"measurement job must be in [{FIRST_MEASUREMENT_JOB}, {MEASUREMENT_JOB_COUNT - 1}], got {job}"
         )
-    config, revision = CELLS[job // RUNS_PER_CELL]
-    return [(job % RUNS_PER_CELL, 0, config, revision)]
+    return [MEASUREMENTS[job - FIRST_MEASUREMENT_JOB]]
 
 
 def output_of(command):
@@ -229,10 +236,12 @@ def capture(args):
         sample.mkdir()
         profiles = sample / "profiles"
         profiles.mkdir()
-        integration = "old"
+        integration = "new" if config == "C" else "old"
         valgrind = "old" if config == "A" else "new"
         manifest = {
             "schema_version": 1,
+            "experiment": "macro-abc35",
+            "batch": "top-up",
             "job": args.job,
             "round": round_number,
             "order": position,
@@ -241,7 +250,9 @@ def capture(args):
             "config": config,
             "revision": revision,
             "source_sha": REVISIONS[revision],
-            "rust_integration": "locked-5.0.2",
+            "rust_integration": RUST_REVISION
+            if integration == "new"
+            else "locked-5.0.2",
             "valgrind_sha": VALGRIND_REVISIONS[valgrind],
             "cpu_model": cpu_model,
             "cpu": cpu,
@@ -263,6 +274,8 @@ def capture(args):
             "image_version": os.environ.get("ImageVersion"),
             "workflow_url": f"https://github.com/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')}",
             "workflow_sha": os.environ.get("GITHUB_SHA"),
+            "workflow_run_id": os.environ.get("GITHUB_RUN_ID"),
+            "workflow_run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
             "upload": "skipped; raw profiles retained in artifact",
             "status": "running",
         }
@@ -356,9 +369,12 @@ def capture(args):
                     f"Expected {EXPECTED_BENCHMARK_COUNT} measured benchmarks, got {len(names)}"
                 )
             pids = {result["pid"] for result in results.values()}
-            if len(pids) >= len(results):
+            expected_process_count = (
+                EXPECTED_BENCHMARK_COUNT if config == "C" else SHARED_PROCESS_COUNT
+            )
+            if len(pids) != expected_process_count:
                 raise ValueError(
-                    "Shared-process control unexpectedly has one measuring process per benchmark"
+                    f"Expected {expected_process_count} measuring processes for {config}, got {len(pids)}"
                 )
             if hashes(VALGRIND_PREFIX) != valgrind_hashes:
                 raise ValueError("Valgrind installation changed during measurement")
@@ -416,9 +432,9 @@ def job_id(value):
         raise argparse.ArgumentTypeError(
             f"measurement job must be an integer, got {value!r}"
         ) from error
-    if not 0 <= job < MEASUREMENT_JOB_COUNT:
+    if not FIRST_MEASUREMENT_JOB <= job < MEASUREMENT_JOB_COUNT:
         raise argparse.ArgumentTypeError(
-            f"measurement job must be in [0, {MEASUREMENT_JOB_COUNT - 1}], got {job}"
+            f"measurement job must be in [{FIRST_MEASUREMENT_JOB}, {MEASUREMENT_JOB_COUNT - 1}], got {job}"
         )
     return job
 
@@ -427,7 +443,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--job", type=job_id, default=0)
+    parser.add_argument("--job", type=job_id, default=FIRST_MEASUREMENT_JOB)
     parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args()
     capture(args)
