@@ -124,6 +124,24 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      #heat {
+        table-layout: fixed;
+        min-width: 960px;
+      }
+      #heat th,
+      #heat td {
+        padding: 4px 6px;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+      }
+      #heat th:first-child {
+        width: 260px;
+      }
+      #heat .cell-n {
+        display: block;
+        color: var(--muted);
+        font-size: 10px;
+      }
       td.na {
         color: var(--muted);
         font-style: italic;
@@ -181,6 +199,11 @@
           <span role="group" aria-label="Configuration" id="configs"></span>
         </div>
         <p class="muted" id="cohort-note"></p>
+        <p class="muted">
+          A: old Valgrind and locked integration. B: new Valgrind with the same
+          benchmark binaries as A. C: new Valgrind and updated integration with
+          per-benchmark process isolation.
+        </p>
       </section>
       <section>
         <h2>Mean Simulation score trend by commit</h2>
@@ -204,9 +227,11 @@
           viewBox="0 0 1200 360"
         ></svg>
         <p class="muted">
-          Lines are per-commit means; dots are individual runs. Scores are only
-          compared within one cohort. Repeated runs on one physical machine are
-          not independent CPUs; no run-level significance is claimed.
+          Lines are per-commit means in Simulation seconds; dots are individual
+          runs. These cohort summaries pool physical machines and include
+          cross-machine variation, not only same-CPU noise. Repeated runs on one
+          physical machine are not independent CPUs; no run-level significance
+          is claimed.
         </p>
         <details>
           <summary>Raw observations for this benchmark and cohort</summary>
@@ -669,14 +694,13 @@
             s(
               "text",
               {
-                x: W - 80,
+                x: W - R,
+                "text-anchor": "end",
                 y: T + 14 * ci + 10,
                 fill: COLORS[config],
                 "font-size": 12,
               },
-              "\u25CF " +
-                config +
-                (config === "C" ? " (integration+isolation)" : ""),
+              "\u25CF " + config,
             ),
           );
         });
@@ -736,20 +760,21 @@
       }
 
       function renderHeat() {
+        $("drill").replaceChildren();
         const rows = (
           (D.heatmap[state.cohort] || {})[state.config] || []
         ).slice();
         const q = $("heat-filter").value.toLowerCase();
         let shown = rows.filter((r) => r.uri.toLowerCase().includes(q));
+        const leaf = (uri) => uri.slice(uri.lastIndexOf("::") + 2);
+        const leafCounts = new Map();
+        for (const row of rows) {
+          const label = leaf(row.uri);
+          leafCounts.set(label, (leafCounts.get(label) || 0) + 1);
+        }
         const { col, dir } = state.sort;
         const key = (r) =>
-          col < 0
-            ? r.uri
-            : col === 100
-              ? Math.max(...r.cells.map((c) => c.n))
-              : r.cells[col].cv === null
-                ? -1
-                : r.cells[col].cv;
+          col < 0 ? r.uri : r.cells[col].cv === null ? -1 : r.cells[col].cv;
         shown.sort((a, b) => {
           const x = key(a),
             y = key(b);
@@ -782,15 +807,20 @@
             };
             return th;
           }),
-          el("th", { text: "max n", tabindex: 0 }),
         );
         head.firstChild.onclick = () => sortBy(-1);
-        head.lastChild.onclick = () => sortBy(100);
+        head.firstChild.onkeydown = (e) => {
+          if (e.key === "Enter") sortBy(-1);
+        };
         const body = shown.map((r) =>
           el(
             "tr",
             {},
-            el("td", { class: "uri", text: r.uri, title: r.uri }),
+            el("td", {
+              class: "uri",
+              text: leafCounts.get(leaf(r.uri)) === 1 ? leaf(r.uri) : r.uri,
+              title: r.uri,
+            }),
             ...r.cells.map((c, i) => {
               const inv = (inventoryOf[D.commits[i].id].uris || []).includes(
                 r.uri,
@@ -805,7 +835,7 @@
                       : "";
               const td = el("td", {
                 class: cls,
-                text: fmtCv(c) + (c.n ? " (n=" + c.n + ")" : ""),
+                text: fmtCv(c),
                 title: cvTitle(r.uri, D.commits[i], c, inv),
                 tabindex: 0,
                 style: cvShade(c),
@@ -818,13 +848,14 @@
                   " n " +
                   c.n,
               });
+              if (c.n)
+                td.append(el("span", { class: "cell-n", text: "n=" + c.n }));
               td.onclick = () => drill(r, i);
               td.onkeydown = (e) => {
                 if (e.key === "Enter") drill(r, i);
               };
               return td;
             }),
-            el("td", { text: String(Math.max(...r.cells.map((c) => c.n))) }),
           ),
         );
         $("heat").replaceChildren(

@@ -6,6 +6,7 @@ import html
 import importlib.util
 import json
 import math
+import statistics
 import sys
 from collections import defaultdict
 from itertools import pairwise
@@ -29,11 +30,7 @@ def stat(values):
     """n/mean/sd/cv for one sample set; cv is None unless defined (n>=2, mean>0)."""
     n = len(values)
     mean = math.fsum(values) / n
-    sd = (
-        math.sqrt(math.fsum((v - mean) ** 2 for v in values) / (n - 1))
-        if n > 1
-        else None
-    )
+    sd = statistics.stdev(values) if n > 1 else None
     cv = sd / mean if sd is not None and mean > 0 else None
     return {
         "n": n,
