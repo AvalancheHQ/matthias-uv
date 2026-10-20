@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Build the frozen artifacts for the uv stack-isolation experiment.
 
-The experiment crosses two uv revisions (base/head) with two CodSpeed Rust
-integrations (old: the lockfile-pinned 5.0.1, new: codspeed-rust @304fa86) and
-runs every measurement under two Valgrind builds (old/new refs).
+The experiment crosses two uv revisions (base/head) with CodSpeed Rust
+integrations (old: the lockfile-pinned 5.0.1, new: codspeed-rust @304fa86,
+warm: codspeed-rust @061f923 = new + warm-cache warmup) and runs every
+measurement under a pinned Valgrind build (old/new refs).
+
+This branch (config D) builds only the ``warm`` integration and the ``new``
+Valgrind; the old/new binaries and the old Valgrind of configs A/B/C were
+built and measured by the ``ci/uv22754-stack-isolation-20261020`` workflow.
 
 Everything is built exactly once, in a canonical ``$GITHUB_WORKSPACE/workload``
 directory, so the ``CARGO_MANIFEST_DIR`` paths compiled into the benchmark
@@ -15,12 +20,12 @@ or symlinks, and :func:`cmd_prepare` restores the trees before capture runs::
 
     sources/{base,head}/                       # pristine source tree + .cache
     sources/{base,head}/experiment-source.json # {source_sha: ...}
-    binaries/{base,head}-{old,new}/uv-bench/   # every benchmark executable
-    binaries/{base,head}-{old,new}/build.json  # {source_sha, rust_sha, sha256}
-    valgrind/{old,new}/                        # contents of the install prefix
-    valgrind/{old,new}.json                    # ref + sha256 of every file
-    locks/{base,head}-{old,new}-Cargo.lock     # retained resolved lockfiles
-    cargo-tree-codspeed-{base,head}-{old,new}.txt
+    binaries/{base,head}-{warm}/uv-bench/      # every benchmark executable
+    binaries/{base,head}-{warm}/build.json     # {source_sha, rust_sha, sha256}
+    valgrind/{new}/                            # contents of the install prefix
+    valgrind/{new}.json                        # ref + sha256 of every file
+    locks/{base,head}-{warm}-Cargo.lock        # retained resolved lockfiles
+    cargo-tree-codspeed-{base,head}-{warm}.txt
     patches/{base,head}-codspeed.patch         # temporary [patch.crates-io] block
     build-info.json                            # merged summary (verify)
 """
@@ -54,7 +59,11 @@ VALGRIND_REVISIONS = {
     "old": pinned("VALGRIND_OLD_SHA", "e1e4bdf3fa3daa61cce684b513f874ff0735b1b8"),
     "new": pinned("VALGRIND_NEW_SHA", "5275f9f34b780c8c9320906a14ef6e160d45bf94"),
 }
-CODSPEED_RUST_REV = pinned("CODSPEED_RUST_REV", "304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a")
+# Git integrations: the revision of codspeed-rust patched into the workload.
+CODSPEED_RUST_REVS = {
+    "new": pinned("CODSPEED_RUST_REV", "304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a"),
+    "warm": pinned("CODSPEED_RUST_WARM_REV", "061f9230eac19fe27c95b8bccef186732558f35e"),
+}
 CODSPEED_RUST_URL = "https://github.com/CodSpeedHQ/codspeed-rust"
 UV_URL = "https://github.com/astral-sh/uv"
 VALGRIND_URL = "https://github.com/CodSpeedHQ/valgrind-codspeed"
@@ -68,7 +77,10 @@ WORKLOAD_MANIFEST_DIR = Path("crates/uv-bench")
 # ``.venv`` is deliberately kept: `benches/uv.rs` resolves
 # `PythonEnvironment::from_root("../../.venv", ...)` next to `../../.cache`.
 SOURCE_EXCLUDES = {"target"}
-INTEGRATIONS = ("old", "new")
+# Built and verified by this workflow; every other integration/Valgrind pin is
+# retained only so the capture script's provenance cross-check stays complete.
+INTEGRATIONS = ("warm",)
+VALGRIND_BUILDS = ("new",)
 REVISIONS = tuple(UV_REVISIONS)
 
 
@@ -335,11 +347,12 @@ def cmd_binaries(args) -> None:
         ).strip()
         metadata["rust_sha"] = "5.0.1"
     else:
+        codspeed_rust_rev = CODSPEED_RUST_REVS[integration]
         codspeed_src = args.codspeed_source.resolve()
-        git_checkout(CODSPEED_RUST_URL, CODSPEED_RUST_REV, codspeed_src)
+        git_checkout(CODSPEED_RUST_URL, codspeed_rust_rev, codspeed_src)
         run(["git", "-C", codspeed_src, "submodule", "update", "--init", "--recursive"])
         # Kept outside the artifact root: only binaries/valgrind/sources ship.
-        tools_root = args.tools_root.resolve() / "cargo-codspeed-new"
+        tools_root = args.tools_root.resolve() / f"cargo-codspeed-{integration}"
         run(
             [
                 "cargo",
@@ -362,8 +375,8 @@ def cmd_binaries(args) -> None:
         original = manifest.read_text()
         patch = (
             "\n[patch.crates-io]\n"
-            f'codspeed = {{ git = "{CODSPEED_RUST_URL}", rev = "{CODSPEED_RUST_REV}" }}\n'
-            f'codspeed-criterion-compat = {{ git = "{CODSPEED_RUST_URL}", rev = "{CODSPEED_RUST_REV}" }}\n'
+            f'codspeed = {{ git = "{CODSPEED_RUST_URL}", rev = "{codspeed_rust_rev}" }}\n'
+            f'codspeed-criterion-compat = {{ git = "{CODSPEED_RUST_URL}", rev = "{codspeed_rust_rev}" }}\n'
         )
         patch_file = artifacts / "patches" / f"{revision}-codspeed.patch"
         patch_file.parent.mkdir(parents=True, exist_ok=True)
@@ -382,11 +395,11 @@ def cmd_binaries(args) -> None:
             tree = run(
                 ["cargo", "tree", "-i", "codspeed-criterion-compat"], cwd=workload, env=env_new, capture=True
             )
-            if CODSPEED_RUST_REV not in tree:
+            if codspeed_rust_rev not in tree:
                 raise SystemExit(f"codspeed patch did not take effect:\n{tree}")
             (artifacts / f"cargo-tree-codspeed-{revision}-{integration}.txt").write_text(tree)
             tree_codspeed = run(["cargo", "tree", "-i", "codspeed"], cwd=workload, env=env_new, capture=True)
-            if CODSPEED_RUST_REV not in tree_codspeed:
+            if codspeed_rust_rev not in tree_codspeed:
                 raise SystemExit(f"codspeed core patch did not take effect:\n{tree_codspeed}")
             (artifacts / f"cargo-tree-codspeed-core-{revision}-{integration}.txt").write_text(tree_codspeed)
             metadata["extra"] = {"codspeed_rust_path": str(codspeed_src), "patch_crates_io": True}
@@ -395,7 +408,7 @@ def cmd_binaries(args) -> None:
             shutil.copy2(workload / "Cargo.lock", lockfile)
         finally:
             manifest.write_text(original)
-        metadata["rust_sha"] = CODSPEED_RUST_REV
+        metadata["rust_sha"] = codspeed_rust_rev
 
     if integration == "old":
         tree = run(
@@ -500,7 +513,7 @@ def capture_constants() -> dict | None:
     return {
         "uv_revisions": dict(module.REVISIONS),
         "valgrind_revisions": dict(module.VALGRIND_REVISIONS),
-        "codspeed_rust_rev": module.RUST_REVISION,
+        "codspeed_rust_revs": dict(module.RUST_REVISIONS),
         "valgrind_prefix": str(module.VALGRIND_PREFIX),
     }
 
@@ -523,8 +536,8 @@ def cmd_verify(args) -> None:
             f"capture Valgrind revisions differ: {shared['valgrind_revisions']}",
         )
         expect(
-            shared["codspeed_rust_rev"] == CODSPEED_RUST_REV,
-            f"capture codspeed-rust rev differs: {shared['codspeed_rust_rev']}",
+            shared["codspeed_rust_revs"] == CODSPEED_RUST_REVS,
+            f"capture codspeed-rust revs differ: {shared['codspeed_rust_revs']}",
         )
         expect(
             shared["valgrind_prefix"] == VALGRIND_PREFIX,
@@ -568,11 +581,12 @@ def cmd_verify(args) -> None:
             expected_targets[key] = names
 
     if expected_targets:
-        reference = expected_targets.get("base-old", [])
+        reference = next(iter(expected_targets.values()))
         for key, names in expected_targets.items():
             expect(names == reference, f"{key}: target list differs: {names} != {reference}")
 
-    for name, revision in VALGRIND_REVISIONS.items():
+    for name in VALGRIND_BUILDS:
+        revision = VALGRIND_REVISIONS[name]
         directory = artifacts / "valgrind" / name
         metadata_file = artifacts / "valgrind" / f"{name}.json"
         expect(directory.is_dir(), f"missing {directory}")
@@ -591,7 +605,7 @@ def cmd_verify(args) -> None:
             "schema_version": 1,
             "uv_revisions": UV_REVISIONS,
             "valgrind_revisions": VALGRIND_REVISIONS,
-            "codspeed_rust_rev": CODSPEED_RUST_REV,
+            "codspeed_rust_revs": CODSPEED_RUST_REVS,
             "valgrind_prefix": VALGRIND_PREFIX,
             "targets": expected_targets,
             "verified": not problems,
@@ -601,7 +615,7 @@ def cmd_verify(args) -> None:
         for problem in problems:
             print(f"::error::{problem}", file=sys.stderr)
         raise SystemExit(f"artifact verification failed with {len(problems)} problem(s)")
-    log(f"verified artifacts: {sorted(expected_targets)} with targets {expected_targets.get('base-old', [])}")
+    log(f"verified artifacts: {sorted(expected_targets)} with targets {reference}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -638,7 +652,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--codspeed-source",
         type=Path,
         default=Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())) / "codspeed-rust",
-        help="codspeed-rust checkout path (identical for both new-integration builds)",
+        help="codspeed-rust checkout path (one pinned revision per integration)",
     )
     binaries.add_argument(
         "--tools-root",
@@ -650,7 +664,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     valgrind = subparsers.add_parser("valgrind", help="build one pinned Valgrind into the artifact prefix layout")
     common(valgrind)
-    valgrind.add_argument("--name", choices=tuple(VALGRIND_REVISIONS), required=True)
+    valgrind.add_argument("--name", choices=VALGRIND_BUILDS, required=True)
     valgrind.set_defaults(func=cmd_valgrind)
 
     prepare = subparsers.add_parser("prepare", help="extract artifact archives restoring modes and symlinks")

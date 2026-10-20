@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Run one frozen A/B Simulation suite per macro job.
+"""Run one frozen Simulation suite per macro job.
 
-Twenty jobs measure each configuration/revision cell. Physical machines may
-be reused after reboot; samples are not paired by job or replicate number.
+Config D = config C (new integration, process isolation, new Valgrind) plus
+the warm-cache warmup of codspeed-rust @061f923: instrumentation is switched
+on before the warmup iterations and only the counters are zeroed before the
+measured iteration, so the measurement starts from a warm simulated cache.
+
+Twenty jobs measure each D cell (global jobs 300..339; A/B/C used 0..299).
+Physical machines may be reused after reboot; samples are not paired by job
+or replicate number.
 """
 
 import argparse
@@ -11,6 +17,7 @@ import json
 import math
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -25,16 +32,29 @@ VALGRIND_REVISIONS = {
     "old": "e1e4bdf3fa3daa61cce684b513f874ff0735b1b8",
     "new": "5275f9f34b780c8c9320906a14ef6e160d45bf94",
 }
-RUST_REVISION = "304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a"
+RUST_REVISIONS = {
+    "new": "304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a",
+    "warm": "061f9230eac19fe27c95b8bccef186732558f35e",
+}
+EXPERIMENT = "macro-abcd"
+BATCH = "warmup-20"
+# integration (binaries) and Valgrind build per configuration.
+CONFIGS = {
+    "A": ("old", "old"),
+    "B": ("old", "new"),
+    "C": ("new", "new"),
+    "D": ("warm", "new"),
+}
 VALGRIND_PREFIX = Path("/opt/stack-isolation/valgrind")
-CELLS = [(config, revision) for config in "ABC" for revision in REVISIONS]
-RUNS_PER_CELL = 50
-REUSED_RUNS_PER_CONFIG = {"A": 35, "B": 35, "C": 35}
-FIRST_MEASUREMENT_JOB = sum(REUSED_RUNS_PER_CONFIG[config] for config, _ in CELLS)
+# Cell indices continue the A/B/C numbering (0..5) of the earlier batches.
+ALL_CELLS = [(config, revision) for config in CONFIGS for revision in REVISIONS]
+CELLS = [(config, revision) for config in "D" for revision in REVISIONS]
+RUNS_PER_CELL = 20
+FIRST_MEASUREMENT_JOB = 300
 MEASUREMENTS = [
     (round_number, 0, config, revision)
     for config, revision in CELLS
-    for round_number in range(REUSED_RUNS_PER_CONFIG[config], RUNS_PER_CELL)
+    for round_number in range(RUNS_PER_CELL)
 ]
 MEASUREMENT_JOB_COUNT = FIRST_MEASUREMENT_JOB + len(MEASUREMENTS)
 EXPECTED_BENCHMARK_COUNT = 68
@@ -119,6 +139,35 @@ def summarize(directory):
     if not results:
         raise ValueError(f"No measured benchmarks in {directory}")
     return results
+
+
+WARMUP_LINE = re.compile(r"^Measured: (?P<uri>\S+)(?: \(group: [^)]*\))? \(warmup: (?P<iterations>\d+) iterations\)$")
+
+
+def attach_warmup_iterations(results, runner_log):
+    """Record how many unmeasured iterations preceded each measured one.
+
+    Only the warm integration prints the count; benchmarks without a line keep
+    no entry so the report can tell "not reported" from a count.
+    """
+    counts = {}
+    with runner_log.open(errors="replace") as stream:
+        for line in stream:
+            match = WARMUP_LINE.match(line.strip())
+            if not match:
+                continue
+            uri = match.group("uri")
+            if uri in counts:
+                raise ValueError(f"Duplicate warmup line for {uri}")
+            counts[uri] = int(match.group("iterations"))
+    for uri, iterations in counts.items():
+        if uri not in results:
+            raise ValueError(f"Warmup line for unmeasured benchmark {uri}")
+        results[uri]["warmup_iterations"] = iterations
+    if counts and len(counts) != len(results):
+        raise ValueError(
+            f"Warmup counts for {len(counts)} of {len(results)} measured benchmarks"
+        )
 
 
 def schedule(job):
@@ -223,7 +272,7 @@ def capture(args):
                 "job": args.job,
                 "round": r,
                 "order": o,
-                "cell": CELLS.index((c, v)),
+                "cell": ALL_CELLS.index((c, v)),
                 "config": c,
                 "revision": v,
             }
@@ -236,23 +285,20 @@ def capture(args):
         sample.mkdir()
         profiles = sample / "profiles"
         profiles.mkdir()
-        integration = "new" if config == "C" else "old"
-        valgrind = "old" if config == "A" else "new"
+        integration, valgrind = CONFIGS[config]
         manifest = {
             "schema_version": 1,
-            "experiment": "macro-abc50",
-            "batch": "extension-50",
+            "experiment": EXPERIMENT,
+            "batch": BATCH,
             "job": args.job,
             "round": round_number,
             "order": position,
-            "cell": CELLS.index((config, revision)),
+            "cell": ALL_CELLS.index((config, revision)),
             "preflight": args.preflight,
             "config": config,
             "revision": revision,
             "source_sha": REVISIONS[revision],
-            "rust_integration": RUST_REVISION
-            if integration == "new"
-            else "locked-5.0.2",
+            "rust_integration": RUST_REVISIONS.get(integration, "locked-5.0.2"),
             "valgrind_sha": VALGRIND_REVISIONS[valgrind],
             "cpu_model": cpu_model,
             "cpu": cpu,
@@ -362,6 +408,7 @@ def capture(args):
                 )
             manifest["measurement_duration_seconds"] = time.monotonic() - measured_start
             results = summarize(profiles)
+            attach_warmup_iterations(results, sample / "runner.log")
             save(sample / "results.json", results)
             names = set(results)
             if len(names) != EXPECTED_BENCHMARK_COUNT:
@@ -370,7 +417,7 @@ def capture(args):
                 )
             pids = {result["pid"] for result in results.values()}
             expected_process_count = (
-                EXPECTED_BENCHMARK_COUNT if config == "C" else SHARED_PROCESS_COUNT
+                EXPECTED_BENCHMARK_COUNT if integration in ("new", "warm") else SHARED_PROCESS_COUNT
             )
             if len(pids) != expected_process_count:
                 raise ValueError(

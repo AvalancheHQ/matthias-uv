@@ -1,12 +1,13 @@
-# Frozen A/B/C Simulation extension: 90 full-suite macro jobs.
-# Reuse the prior 210 A/B/C runs to reach 50 observations per cell.
-# All executable and Valgrind artifacts are reused without rebuilding.
+# Frozen config D Simulation batch: 40 full-suite macro jobs (20 per cell).
+# D = C (codspeed-rust @304fa86, process isolation, new Valgrind) + the
+# warm-cache warmup of codspeed-rust @061f923. Only the warm binaries and the
+# new Valgrind are built; A/B/C results come from the earlier 300-job runs.
 name: Stack Isolation
 
 on:
   push:
     branches:
-      - ci/uv22754-stack-isolation-20261020
+      - ci/uv22754-stack-isolation-warmup-20261021
     paths:
       - .github/workflows/stack-isolation.yml
       - scripts/stack-isolation-build.py
@@ -32,6 +33,7 @@ env:
   VALGRIND_OLD_SHA: e1e4bdf3fa3daa61cce684b513f874ff0735b1b8
   VALGRIND_NEW_SHA: 5275f9f34b780c8c9320906a14ef6e160d45bf94
   CODSPEED_RUST_REV: 304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a
+  CODSPEED_RUST_WARM_REV: 061f9230eac19fe27c95b8bccef186732558f35e
   CODESPEED_RUNNER_VERSION: 5.2.1
   CODESPEED_RUNNER_SHA256: 932016a307416fd68359a2c5b9b0a6ff822e884fb2549e2e2724b7076da0c3da
   STACK_ISOLATION_ARTIFACTS: ${{ github.workspace }}/artifacts
@@ -52,7 +54,7 @@ jobs:
         run: |
           plan=scripts/stack-isolation-plan.json
           jq -e '.phase == "build-preflight" or ((.phase == "preflight" or .phase == "measure") and (.build_run_id | test("^[0-9]+$")))' "$plan"
-          jq -e '.measurement_jobs == [range(210; 300)]' "$plan"
+          jq -e '.measurement_jobs == [range(300; 340)]' "$plan"
           {
             echo "phase=$(jq -r .phase "$plan")"
             echo "run-id=$(jq -r .build_run_id "$plan")"
@@ -70,17 +72,11 @@ jobs:
       matrix:
         include:
           - revision: base
-            integration: old
+            integration: warm
             snapshot: "true"
           - revision: head
-            integration: old
+            integration: warm
             snapshot: "true"
-          - revision: base
-            integration: new
-            snapshot: "false"
-          - revision: head
-            integration: new
-            snapshot: "false"
     steps:
       - name: "Checkout experiment branch"
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -117,7 +113,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cache/uv
-          key: stack-isolation-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ env.CODSPEED_RUST_REV }}
+          key: stack-isolation-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ env.CODSPEED_RUST_WARM_REV }}
           restore-keys: |
             stack-isolation-cargo-${{ runner.os }}-
 
@@ -169,7 +165,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        name: [old, new]
+        name: [new]
     steps:
       - name: "Checkout experiment branch"
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -216,7 +212,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # Optional C preflights are excluded from the 90-job measurement matrix.
+  # D preflights (one per cell) are excluded from every statistic; the same
+  # job ids are measured again in the measure phase.
   preflight:
     name: "preflight job ${{ matrix.job }}"
     needs: [plan, build, valgrind]
@@ -232,7 +229,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        job: [270, 285]
+        job: [300, 320]
     steps:
       - name: "Checkout experiment branch"
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
