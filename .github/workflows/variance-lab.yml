@@ -1,0 +1,270 @@
+# Variance lab: N independent macro-runner Simulation executions of one candidate.
+# Frozen uv `head` sources + benchmark executables + Valgrind are reused across runs;
+# a run rebuilds only what its plan marks as "build".
+name: Variance Lab
+
+on:
+  push:
+    branches:
+      - ci/variance-lab
+    paths:
+      - .github/workflows/variance-lab.yml
+      - variance-lab/**
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: variance-lab-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  CARGO_TERM_COLOR: always
+  RUSTUP_MAX_RETRIES: "10"
+  UV_LOCKED: "1"
+  CODESPEED_RUNNER_VERSION: 5.2.1
+  CODESPEED_RUNNER_SHA256: 932016a307416fd68359a2c5b9b0a6ff822e884fb2549e2e2724b7076da0c3da
+  LAB_ARTIFACTS: ${{ github.workspace }}/artifacts
+  LAB_WORKLOAD: ${{ github.workspace }}/workload
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      runs: ${{ steps.plan.outputs.runs }}
+      sources-mode: ${{ steps.plan.outputs.sources-mode }}
+      sources-run-id: ${{ steps.plan.outputs.sources-run-id }}
+      sources-name: ${{ steps.plan.outputs.sources-name }}
+      binaries-mode: ${{ steps.plan.outputs.binaries-mode }}
+      binaries-run-id: ${{ steps.plan.outputs.binaries-run-id }}
+      binaries-name: ${{ steps.plan.outputs.binaries-name }}
+      valgrind-mode: ${{ steps.plan.outputs.valgrind-mode }}
+      valgrind-run-id: ${{ steps.plan.outputs.valgrind-run-id }}
+      valgrind-name: ${{ steps.plan.outputs.valgrind-name }}
+      codspeed-rust-url: ${{ steps.plan.outputs.codspeed-rust-url }}
+      codspeed-rust-rev: ${{ steps.plan.outputs.codspeed-rust-rev }}
+      valgrind-url: ${{ steps.plan.outputs.valgrind-url }}
+      valgrind-rev: ${{ steps.plan.outputs.valgrind-rev }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        run: |
+          plan=variance-lab/plan.json
+          jq -e '(.runs | type == "array") and (.runs | length > 0)' "$plan"
+          {
+            echo "runs=$(jq -c .runs "$plan")"
+            for part in sources binaries valgrind; do
+              echo "$part-mode=$(jq -r ".$part.mode" "$plan")"
+              echo "$part-run-id=$(jq -r ".$part.run_id // empty" "$plan")"
+              echo "$part-name=$(jq -r ".$part.name // empty" "$plan")"
+            done
+            echo "codspeed-rust-url=$(jq -r .candidate.codspeed_rust_url "$plan")"
+            echo "codspeed-rust-rev=$(jq -r .candidate.codspeed_rust_rev "$plan")"
+            echo "valgrind-url=$(jq -r .candidate.valgrind_url "$plan")"
+            echo "valgrind-rev=$(jq -r .candidate.valgrind_rev "$plan")"
+          } >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
+  sources:
+    name: "import sources"
+    needs: plan
+    if: needs.plan.outputs.sources-mode == 'import'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Download source-bearing artifact"
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.plan.outputs.sources-name }}
+          path: artifacts
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ needs.plan.outputs.sources-run-id }}
+      - name: "Keep only the frozen head sources"
+        run: python3 variance-lab/ci/build.py sources-import --artifacts "$LAB_ARTIFACTS"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: variance-lab-sources
+          path: artifacts
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  binaries:
+    name: "build uv-bench (codspeed-rust ${{ needs.plan.outputs.codspeed-rust-rev }})"
+    needs: [plan, sources]
+    if: >-
+      always() && !cancelled() && needs.plan.result == 'success' &&
+      needs.plan.outputs.binaries-mode == 'build' &&
+      (needs.sources.result == 'success' || needs.sources.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Free disk space"
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/aws-cli /usr/local/.ghcup /usr/share/swift \
+            /usr/lib/google-cloud-sdk /usr/local/go /usr/local/share/chromium
+          sudo apt-get clean
+          df -h /
+      - name: "Install Rust toolchain"
+        run: rustup show
+      - name: "Install system dependencies"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsasl2-dev libldap2-dev libkrb5-dev zstd
+      - name: "Restore Cargo caches"
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: variance-lab-cargo-${{ runner.os }}-${{ needs.plan.outputs.codspeed-rust-rev }}
+          restore-keys: |
+            variance-lab-cargo-${{ runner.os }}-
+            stack-isolation-cargo-${{ runner.os }}-
+      - name: "Download frozen sources"
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: variance-lab-sources
+          path: artifacts
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ needs.plan.outputs.sources-mode == 'import' && github.run_id || needs.plan.outputs.sources-run-id }}
+      - name: "Build benchmark executables"
+        run: |
+          python3 variance-lab/ci/build.py binaries \
+            --artifacts "$LAB_ARTIFACTS" \
+            --workload "$LAB_WORKLOAD" \
+            --codspeed-source "$RUNNER_TEMP/codspeed-rust" \
+            --tools-root "$RUNNER_TEMP/tools" \
+            --codspeed-url "${{ needs.plan.outputs.codspeed-rust-url }}" \
+            --codspeed-rev "${{ needs.plan.outputs.codspeed-rust-rev }}"
+          rm -rf "$LAB_WORKLOAD/target"
+          du -sh "$LAB_ARTIFACTS"/* || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: variance-lab-binaries
+          path: artifacts
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  valgrind:
+    name: "build valgrind ${{ needs.plan.outputs.valgrind-rev }}"
+    needs: plan
+    if: needs.plan.outputs.valgrind-mode == 'build'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Install Valgrind build dependencies"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential automake autoconf cmake libc6-dev libcap2-bin gdb \
+            docbook docbook-xsl docbook-xml xsltproc zstd
+      - name: "Build pinned Valgrind"
+        run: |
+          python3 variance-lab/ci/build.py valgrind \
+            --artifacts "$LAB_ARTIFACTS" \
+            --git-cache "$RUNNER_TEMP/git" \
+            --valgrind-url "${{ needs.plan.outputs.valgrind-url }}" \
+            --valgrind-rev "${{ needs.plan.outputs.valgrind-rev }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: variance-lab-valgrind
+          path: artifacts
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  measure:
+    name: "measure ${{ matrix.job }}"
+    needs: [plan, sources, binaries, valgrind]
+    if: >-
+      always() && !cancelled() && needs.plan.result == 'success' &&
+      (needs.sources.result == 'success' || needs.sources.result == 'skipped') &&
+      (needs.binaries.result == 'success' || needs.binaries.result == 'skipped') &&
+      (needs.valgrind.result == 'success' || needs.valgrind.result == 'skipped')
+    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
+    env:
+      # Must equal the path the sources were primed at (checked by capture).
+      VARIANCE_LAB_WORKLOAD: /home/runner/work/matthias-uv/matthias-uv/workload
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        job: ${{ fromJSON(needs.plan.outputs.runs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Prepare frozen workload location"
+        run: |
+          sudo mkdir -p "$(dirname "$VARIANCE_LAB_WORKLOAD")"
+          sudo chown "$(id -u):$(id -g)" "$(dirname "$VARIANCE_LAB_WORKLOAD")"
+      - name: "Install measurement runtime"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libc6-dbg zstd
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/codspeed-runner.tar.gz" \
+            "https://github.com/CodSpeedHQ/runner/releases/download/v${CODESPEED_RUNNER_VERSION}/codspeed-runner-x86_64-unknown-linux-musl.tar.gz"
+          echo "${CODESPEED_RUNNER_SHA256}  $RUNNER_TEMP/codspeed-runner.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/codspeed-runner.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/codspeed-runner-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/codspeed-runner-x86_64-unknown-linux-musl/codspeed" --version
+      - name: "Install CodSpeed executor tools once"
+        run: codspeed setup --mode simulation --setup-cache-dir "$RUNNER_TEMP/codspeed-setup"
+      - name: "Download frozen sources"
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: variance-lab-sources
+          path: artifacts
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ needs.plan.outputs.sources-mode == 'import' && github.run_id || needs.plan.outputs.sources-run-id }}
+      - name: "Download benchmark executables"
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.plan.outputs.binaries-mode == 'build' && 'variance-lab-binaries' || needs.plan.outputs.binaries-name }}
+          path: artifacts
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ needs.plan.outputs.binaries-mode == 'build' && github.run_id || needs.plan.outputs.binaries-run-id }}
+      - name: "Download Valgrind"
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.plan.outputs.valgrind-mode == 'build' && 'variance-lab-valgrind' || needs.plan.outputs.valgrind-name }}
+          path: artifacts
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ needs.plan.outputs.valgrind-mode == 'build' && github.run_id || needs.plan.outputs.valgrind-run-id }}
+      - name: "Restore archives"
+        run: |
+          python3 variance-lab/ci/build.py prepare --artifacts "$LAB_ARTIFACTS"
+          df -h /
+      - name: "Run measurement"
+        run: |
+          python3 variance-lab/ci/capture.py \
+            --artifacts "$LAB_ARTIFACTS" \
+            --output "$GITHUB_WORKSPACE/capture-out/job-${{ matrix.job }}" \
+            --candidate variance-lab/candidate.json \
+            --lab "$GITHUB_WORKSPACE/variance-lab/ci" \
+            --job "${{ matrix.job }}"
+      - name: "Upload measurement capture"
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: capture-job-${{ matrix.job }}
+          path: capture-out
+          compression-level: 0
+          if-no-files-found: warn
+          retention-days: 30

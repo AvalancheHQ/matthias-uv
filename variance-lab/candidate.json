@@ -1,0 +1,29 @@
+{
+  "name": "baseline-config-C",
+  "codspeed_rust_url": "https://github.com/CodSpeedHQ/codspeed-rust",
+  "codspeed_rust_rev": "304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a",
+  "valgrind_url": "https://github.com/CodSpeedHQ/valgrind-codspeed",
+  "valgrind_rev": "5275f9f34b780c8c9320906a14ef6e160d45bf94",
+  "runs": 3,
+  "targets": [
+    "uv",
+    "uv_python",
+    "workspace_discovery"
+  ],
+  "env_mode": "inherit",
+  "env": {},
+  "wrapper": [],
+  "runner_args": [],
+  "setup_commands": [],
+  "required_benchmarks": [
+    "install_wheel_many_files",
+    "load_python_download_catalog",
+    "resolve_warm_jupyter_universal",
+    "resolve_warm_airflow",
+    "run_python_version_synthetic_workspace",
+    "resolve_warm_jupyter",
+    "unpack_sdist_many_files",
+    "discover_workspace_from_all_members",
+    "discover_workspace_from_all_members_with_excludes"
+  ]
+}
