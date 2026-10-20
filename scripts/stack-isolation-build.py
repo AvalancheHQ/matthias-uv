@@ -329,13 +329,15 @@ def cmd_binaries(args) -> None:
             env=env,
         )
         metadata["cargo_codspeed_version"] = run(
-            ["uv", "run", "--only-dev", "cargo", "codspeed", "--version"],
+            ["uv", "run", "--only-dev", "python", "-c",
+             "from importlib.metadata import version; print(version('astral-dev-toolchain-cargo-codspeed'))"],
             cwd=workload, env=env, capture=True,
         ).strip()
         metadata["rust_sha"] = "5.0.1"
     else:
         codspeed_src = args.codspeed_source.resolve()
         git_checkout(CODSPEED_RUST_URL, CODSPEED_RUST_REV, codspeed_src)
+        run(["git", "-C", codspeed_src, "submodule", "update", "--init", "--recursive"])
         # Kept outside the artifact root: only binaries/valgrind/sources ship.
         tools_root = args.tools_root.resolve() / "cargo-codspeed-new"
         run(
@@ -352,7 +354,9 @@ def cmd_binaries(args) -> None:
             env=env,
         )
         cargo_codspeed = tools_root / "bin" / "cargo-codspeed"
-        metadata["cargo_codspeed_version"] = run([cargo_codspeed, "--version"], capture=True).strip()
+        metadata["cargo_codspeed_version"] = run(
+            ["cargo", "install", "--list", "--root", tools_root], capture=True
+        ).strip()
 
         manifest = workload / "Cargo.toml"
         original = manifest.read_text()
