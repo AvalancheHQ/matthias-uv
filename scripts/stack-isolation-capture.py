@@ -141,7 +141,9 @@ def summarize(directory):
     return results
 
 
-WARMUP_LINE = re.compile(r"^Measured: (?P<uri>\S+)(?: \(group: [^)]*\))? \(warmup: (?P<iterations>\d+) iterations\)$")
+# Benchmark URIs may contain spaces (e.g. version specifiers), so the URI is
+# everything between the prefix and the trailing warmup suffix.
+WARMUP_LINE = re.compile(r"^Measured: (?P<uri>.+?)(?: \(group: [^)]*\))? \(warmup: (?P<iterations>\d+) iterations\)$")
 
 
 def attach_warmup_iterations(results, runner_log, required):
