@@ -4,7 +4,7 @@
   "codspeed_rust_rev": "304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a",
   "valgrind_url": "https://github.com/CodSpeedHQ/valgrind-codspeed",
   "valgrind_rev": "5275f9f34b780c8c9320906a14ef6e160d45bf94",
-  "runs": 3,
+  "runs": 15,
   "targets": [
     "uv",
     "uv_python",
