@@ -1,15 +1,6 @@
-# Frozen-artifact experiment: uv base/head x CodSpeed Rust old/new x Valgrind old/new.
-#
-# The checked-in plan selects build-preflight or measure. The measurement
-# phase references a completed build run and never rebuilds its artifacts.
-#
-# Measurement is 60 hosted-VM jobs (0..59), each running the suite exactly
-# once; job % 6 picks the cell and job // 6 the replicate. Hosted runners may
-# share a physical machine, so manifests record observable runner identity only.
-# The preflight job is a 3-cell setup diagnostic and is not one of the 60.
-#
-# The build workflow deliberately does not upload to CodSpeed: the capture
-# script runs the runner with --skip-upload and keeps local raw profiles.
+# Frozen A/B Simulation: one full suite per macro job, 20 jobs per cell.
+# Four separate preflights are excluded from measurement. Frozen build
+# artifacts are reused; raw captures are retained without CodSpeed uploads.
 name: Stack Isolation
 
 on:
@@ -60,10 +51,8 @@ jobs:
       - id: plan
         run: |
           plan=scripts/stack-isolation-plan.json
-          jq -e '.phase == "build-preflight" or (.phase == "measure" and (.build_run_id | test("^[0-9]+$")))' "$plan"
-          # Exactly the 60 measurement jobs; each matrix job gets its own VM
-          # and runs the suite once, so there is no round/execution batching.
-          jq -e '.measurement_jobs == [range(0; 60)]' "$plan"
+          jq -e '.phase == "build-preflight" or ((.phase == "preflight" or .phase == "measure") and (.build_run_id | test("^[0-9]+$")))' "$plan"
+          jq -e '.measurement_jobs == [range(0; 80)]' "$plan"
           {
             echo "phase=$(jq -r .phase "$plan")"
             echo "run-id=$(jq -r .build_run_id "$plan")"
@@ -227,27 +216,33 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # Setup diagnostic only: one base-config run per config cell. Excluded from
-  # the 60 measurement jobs and their cohort coverage.
+  # Preflight samples are excluded from the 80-job measurement matrix.
   preflight:
-    name: "preflight A/B/C on base"
+    name: "preflight job ${{ matrix.job }}"
     needs: [plan, build, valgrind]
-    if: needs.plan.outputs.phase == 'build-preflight'
-    runs-on: ubuntu-24.04
+    if: >-
+      always() && !cancelled() && needs.plan.result == 'success' &&
+      (needs.plan.outputs.phase == 'preflight' ||
+       (needs.plan.outputs.phase == 'build-preflight' &&
+        needs.build.result == 'success' && needs.valgrind.result == 'success'))
+    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
+    env:
+      STACK_ISOLATION_WORKLOAD: /home/runner/work/matthias-uv/matthias-uv/workload
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [0, 20, 40, 60]
     steps:
       - name: "Checkout experiment branch"
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: "Free disk space"
+      - name: "Prepare frozen workload location"
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/boost /usr/local/aws-cli /usr/local/.ghcup /usr/share/swift \
-            /usr/lib/google-cloud-sdk /usr/local/go /usr/local/share/chromium
-          sudo apt-get clean
-          df -h /
+          sudo mkdir -p "$(dirname "$STACK_ISOLATION_WORKLOAD")"
+          sudo chown "$(id -u):$(id -g)" "$(dirname "$STACK_ISOLATION_WORKLOAD")"
 
       - name: "Install measurement runtime"
         run: |
@@ -274,7 +269,7 @@ jobs:
           merge-multiple: true
           path: artifacts
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.run_id }}
+          run-id: ${{ needs.plan.outputs.phase == 'build-preflight' && github.run_id || needs.plan.outputs.run-id }}
 
       - name: "Restore archive modes and verify artifacts"
         run: |
@@ -289,15 +284,15 @@ jobs:
         run: |
           python3 scripts/stack-isolation-capture.py \
             --artifacts "$STACK_ISOLATION_ARTIFACTS" \
-            --output "$GITHUB_WORKSPACE/capture-out/preflight" \
-            --job 0 \
+            --output "$GITHUB_WORKSPACE/capture-out/preflight-${{ matrix.job }}" \
+            --job "${{ matrix.job }}" \
             --preflight
 
       - name: "Upload preflight capture"
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: capture-preflight
+          name: capture-preflight-${{ matrix.job }}
           path: capture-out
           compression-level: 0
           if-no-files-found: warn
@@ -307,7 +302,9 @@ jobs:
     name: "measure job ${{ matrix.job }}"
     needs: plan
     if: needs.plan.outputs.phase == 'measure'
-    runs-on: ubuntu-24.04
+    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
+    env:
+      STACK_ISOLATION_WORKLOAD: /home/runner/work/matthias-uv/matthias-uv/workload
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -319,13 +316,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: "Free disk space"
+      - name: "Prepare frozen workload location"
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/boost /usr/local/aws-cli /usr/local/.ghcup /usr/share/swift \
-            /usr/lib/google-cloud-sdk /usr/local/go /usr/local/share/chromium
-          sudo apt-get clean
-          df -h /
+          sudo mkdir -p "$(dirname "$STACK_ISOLATION_WORKLOAD")"
+          sudo chown "$(id -u):$(id -g)" "$(dirname "$STACK_ISOLATION_WORKLOAD")"
 
       - name: "Install measurement runtime"
         run: |
