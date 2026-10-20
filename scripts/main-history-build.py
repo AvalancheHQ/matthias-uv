@@ -76,7 +76,6 @@ def output(command, *, cwd=None, env=None) -> str:
         env=env,
         text=True,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
         check=False,
     )
     if completed.returncode != 0:

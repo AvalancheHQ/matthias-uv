@@ -34,7 +34,8 @@ jobs:
   plan:
     runs-on: ubuntu-24.04
     outputs:
-      builds: ${{ steps.plan.outputs.builds }}
+      first-build: ${{ steps.plan.outputs.first-build }}
+      remaining-builds: ${{ steps.plan.outputs.remaining-builds }}
       initial: ${{ steps.plan.outputs.initial }}
       remaining-a: ${{ steps.plan.outputs.remaining-a }}
       remaining-b: ${{ steps.plan.outputs.remaining-b }}
@@ -86,7 +87,8 @@ jobs:
           assert sum(map(len, matrices.values())) == len(jobs)
           outputs = {
               **{key: json.dumps(value, separators=(",", ":")) for key, value in matrices.items()},
-              "builds": json.dumps(commits, separators=(",", ":")),
+              "first-build": json.dumps(commits[:1], separators=(",", ":")),
+              "remaining-builds": json.dumps(commits[1:], separators=(",", ":")),
               "prerequisite-run": plan["prerequisite_workflow_id"],
               "valgrind-run": plan["valgrind_artifact_workflow_id"],
               "rust-toolchain": plan["pins"]["rust_toolchain"],
@@ -98,7 +100,7 @@ jobs:
                   stream.write(f"{key}={value}\n")
           PY
 
-  build:
+  build-first:
     name: "build ${{ matrix.id }}"
     needs: plan
     runs-on: ubuntu-24.04
@@ -108,8 +110,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.builds) }}
-    steps:
+        include: ${{ fromJSON(needs.plan.outputs.first-build) }}
+    steps: &build-steps
       - name: Checkout experiment
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -150,6 +152,19 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 90
+
+  build:
+    name: "build ${{ matrix.id }}"
+    needs: [plan, build-first]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      RUSTUP_TOOLCHAIN: ${{ needs.plan.outputs.rust-toolchain }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.remaining-builds) }}
+    steps: *build-steps
 
   gate:
     name: Wait for the current measurement batch
