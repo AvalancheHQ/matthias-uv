@@ -4,9 +4,8 @@
 # phase references a completed build run and never rebuilds its artifacts.
 #
 # Measurement is 60 hosted-VM jobs (0..59), each running the suite exactly
-# once; job % 6 picks the cell and job // 6 the replicate. max-parallel only
-# bounds concurrent VMs, so it does not batch samples. Hosted runners may share
-# a physical machine, so manifests record observable runner identity only.
+# once; job % 6 picks the cell and job // 6 the replicate. Hosted runners may
+# share a physical machine, so manifests record observable runner identity only.
 # The preflight job is a 3-cell setup diagnostic and is not one of the 60.
 #
 # The build workflow deliberately does not upload to CodSpeed: the capture
@@ -312,9 +311,6 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      # One job per fresh hosted VM; max-parallel only caps how many VMs run
-      # at once, each job still executes the suite exactly once.
-      max-parallel: 5
       matrix:
         job: ${{ fromJSON(needs.plan.outputs.jobs) }}
     steps:
