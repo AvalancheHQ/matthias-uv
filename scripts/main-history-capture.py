@@ -5,6 +5,10 @@ Consumes the per-commit bundle produced by ``main-history-build.py`` plus the
 two frozen Valgrind artifacts. Nothing is rebuilt: sources, binaries and
 Valgrind trees are verified against the plan pins and the build metadata, then
 the suite is measured with the established runner command.
+The required ``--build-run`` identifies the immutable artifact workflow, which
+can differ from the measurement workflow. Executed targets may contain no
+active benchmarks for this platform or mode; A/B require one measuring process
+per active target, while C requires one per benchmark.
 
 Configurations: A = old Valgrind + old integration binaries, B = new Valgrind +
 the same old binaries, C = new Valgrind + new integration binaries.
@@ -252,6 +256,7 @@ def validate_results(
     results: dict, config: str, expected_targets: list[str]
 ) -> set[str]:
     expect(bool(results), "no measured benchmarks")
+    target_pids: dict[str, set[str]] = {}
     for uri, result in results.items():
         counters = result["counters"]
         expect(
@@ -264,8 +269,17 @@ def validate_results(
             all(isinstance(value, int) and value >= 0 for value in counters.values()),
             f"invalid counters for {uri!r}",
         )
+        target = Path(uri.split("::", 1)[0]).stem
+        expect(target in expected_targets, f"unplanned measuring target {target!r}")
+        target_pids.setdefault(target, set()).add(result["pid"])
     pids = {result["pid"] for result in results.values()}
-    expected = len(results) if config == "C" else len(expected_targets)
+    # Platform- and mode-gated executables can finish without measuring any cases.
+    expected = len(results) if config == "C" else len(target_pids)
+    if config != "C":
+        expect(
+            all(len(processes) == 1 for processes in target_pids.values()),
+            "non-isolated target measured in multiple processes",
+        )
     expect(
         len(pids) == expected,
         f"expected {expected} measuring processes for {config}, got {len(pids)}",
@@ -363,8 +377,8 @@ def capture(args) -> None:
             )
         manifest["build_workflow_run_id"] = metadata["workflow_run_id"]
         expect(
-            os.environ.get("GITHUB_RUN_ID") == metadata["workflow_run_id"],
-            f"capture run {os.environ.get('GITHUB_RUN_ID')} differs from build run {metadata['workflow_run_id']}",
+            args.build_run == metadata["workflow_run_id"],
+            f"requested build run {args.build_run} differs from artifact run {metadata['workflow_run_id']}",
         )
         save(sample / "manifest.json", manifest)
 
@@ -553,6 +567,7 @@ def main() -> None:
     )
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--artifacts", type=Path, required=True)
+    parser.add_argument("--build-run", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--job", type=job_number, required=True)
     capture(parser.parse_args())

@@ -3,6 +3,10 @@
 
 The parsing here is the single source of truth for both the validation
 verdict and `main-history-report.py`, which imports `load_dataset`.
+Captures may span measurement workflows, but must share one frozen build
+workflow and byte-identical per-commit build metadata. Process counts use
+active benchmark targets rather than executables that can legitimately skip
+all measurements on the current platform or in Simulation mode.
 """
 
 import argparse
@@ -279,9 +283,14 @@ def check_results(results, manifest, check, label):
         check.error(f"{label}: results.json must be a nonempty URI mapping")
         return None
     observations = {}
+    target_pids = defaultdict(set)
     for uri, result in results.items():
         if "::" not in uri:
             check.error(f"{label}: result key {uri!r} is not a benchmark URI")
+            continue
+        target = Path(uri.split("::", 1)[0]).stem
+        if target not in manifest["targets"]:
+            check.error(f"{label}: unplanned measuring target {target!r}")
             continue
         if not isinstance(result, dict) or set(result) != RESULT_KEYS:
             check.error(f"{label}: {uri} must have exactly {sorted(RESULT_KEYS)}")
@@ -314,6 +323,7 @@ def check_results(results, manifest, check, label):
                 f"{label}: {uri} seconds {seconds} != score terms {sum(terms.values())}"
             )
             continue
+        target_pids[target].add(result["pid"])
         observations[uri] = {
             "seconds": seconds,
             "terms": terms,
@@ -328,7 +338,11 @@ def check_results(results, manifest, check, label):
     processes = len(
         {result.get("pid") for result in results.values() if isinstance(result, dict)}
     )
-    expected = len(results) if manifest["config"] == "C" else len(manifest["targets"])
+    expected = len(results) if manifest["config"] == "C" else len(target_pids)
+    if manifest["config"] != "C" and any(
+        len(pids) != 1 for pids in target_pids.values()
+    ):
+        check.error(f"{label}: non-isolated target measured in multiple processes")
     if processes != expected or manifest.get("measured_process_count") != processes:
         check.error(
             f"{label}: measured processes {processes} (manifest {manifest.get('measured_process_count')}), expected {expected}"
@@ -382,12 +396,6 @@ def check_manifest(manifest, sample, plan, plan_sha, planned, check, label):
     ):
         check.error(
             f"{label}: directory name does not match planned round/config/revision"
-        )
-    if str(manifest.get("build_workflow_run_id")) != str(
-        manifest.get("workflow_run_id")
-    ):
-        check.error(
-            f"{label}: build_workflow_run_id differs from measuring workflow_run_id"
         )
     environment = manifest["environment"]
     for key, value in {
@@ -497,6 +505,7 @@ def load_sample(sample, plan, plan_sha, planned_jobs, check):
         "boot_id": manifest["boot_id"],
         "runner_name": manifest.get("runner_name"),
         "workflow_run_id": str(manifest["workflow_run_id"]),
+        "build_workflow_run_id": str(manifest["build_workflow_run_id"]),
         "workflow_run_attempt": manifest.get("workflow_run_attempt"),
         "duration_seconds": manifest.get("duration_seconds"),
         "measurement_duration_seconds": manifest.get("measurement_duration_seconds"),
@@ -538,8 +547,8 @@ def cross_check(samples, plan, check):
     same_within(
         samples,
         lambda s: "experiment",
-        lambda s: s["workflow_run_id"],
-        "workflow run",
+        lambda s: s["build_workflow_run_id"],
+        "frozen build workflow run",
         check,
     )
     same_within(

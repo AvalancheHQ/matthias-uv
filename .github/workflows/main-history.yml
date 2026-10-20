@@ -34,16 +34,12 @@ jobs:
   plan:
     runs-on: ubuntu-24.04
     outputs:
-      first-build: ${{ steps.plan.outputs.first-build }}
-      remaining-builds: ${{ steps.plan.outputs.remaining-builds }}
       initial: ${{ steps.plan.outputs.initial }}
       remaining-a: ${{ steps.plan.outputs.remaining-a }}
       remaining-b: ${{ steps.plan.outputs.remaining-b }}
       prerequisite-run: ${{ steps.plan.outputs.prerequisite-run }}
       valgrind-run: ${{ steps.plan.outputs.valgrind-run }}
-      rust-toolchain: ${{ steps.plan.outputs.rust-toolchain }}
-      uv-version: ${{ steps.plan.outputs.uv-version }}
-      uv-checksum: ${{ steps.plan.outputs.uv-checksum }}
+      build-run: ${{ steps.plan.outputs.build-run }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -58,6 +54,7 @@ jobs:
 
           MATRIX_LIMIT = 256
           REMAINING_PARTITIONS = 2
+          BUILD_WORKFLOW_RUN_ID = "39506297222"
           plan = json.loads(Path("scripts/main-history-plan.json").read_text())
           commits = plan["commits"]
           configs = plan["configs"]
@@ -79,96 +76,28 @@ jobs:
           matrix = lambda selected: [
               {key: job[key] for key in ("job", "revision", "config")} for job in selected
           ]
-          initial = matrix([job for job in jobs if job["round"] == 0])
+          # Only C has completed every capture integrity check in the frozen-build run.
+          initial = matrix([job for job in jobs if job["round"] == 0 and job["config"] != "C"])
+          retained = [job for job in jobs if job["round"] == 0 and job["config"] == "C"]
           remaining = matrix([job for job in jobs if job["round"] != 0])
           split = (len(remaining) + REMAINING_PARTITIONS - 1) // REMAINING_PARTITIONS
           matrices = {"initial": initial, "remaining-a": remaining[:split], "remaining-b": remaining[split:]}
           assert all(0 < len(value) <= MATRIX_LIMIT for value in matrices.values())
-          assert sum(map(len, matrices.values())) == len(jobs)
+          assert sum(map(len, matrices.values())) + len(retained) == len(jobs)
           outputs = {
               **{key: json.dumps(value, separators=(",", ":")) for key, value in matrices.items()},
-              "first-build": json.dumps(commits[:1], separators=(",", ":")),
-              "remaining-builds": json.dumps(commits[1:], separators=(",", ":")),
               "prerequisite-run": plan["prerequisite_workflow_id"],
               "valgrind-run": plan["valgrind_artifact_workflow_id"],
-              "rust-toolchain": plan["pins"]["rust_toolchain"],
-              "uv-version": plan["pins"]["uv_version"],
-              "uv-checksum": plan["pins"]["uv_archive_sha256"],
+              "build-run": BUILD_WORKFLOW_RUN_ID,
           }
           with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
               for key, value in outputs.items():
                   stream.write(f"{key}={value}\n")
           PY
 
-  build-first:
-    name: "build ${{ matrix.id }}"
-    needs: plan
-    runs-on: ubuntu-24.04
-    timeout-minutes: 240
-    env:
-      RUSTUP_TOOLCHAIN: ${{ needs.plan.outputs.rust-toolchain }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.plan.outputs.first-build) }}
-    steps: &build-steps
-      - name: Checkout experiment
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Free build disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/boost /usr/local/aws-cli /usr/local/.ghcup /usr/share/swift \
-            /usr/lib/google-cloud-sdk /usr/local/go /usr/local/share/chromium
-          sudo apt-get clean
-          df -h /
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-      - name: Install pinned uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
-        with:
-          version: ${{ needs.plan.outputs.uv-version }}
-          checksum: ${{ needs.plan.outputs.uv-checksum }}
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsasl2-dev libldap2-dev libkrb5-dev zstd
-      - name: Build frozen commit bundle
-        run: |
-          python3 scripts/main-history-build.py \
-            --plan scripts/main-history-plan.json \
-            --commit '${{ matrix.id }}' \
-            --artifacts "$STACK_ISOLATION_ARTIFACTS" \
-            --workload "$STACK_ISOLATION_WORKLOAD" \
-            --git-cache "$RUNNER_TEMP/git" \
-            --codspeed-source "$RUNNER_TEMP/codspeed-rust" \
-            --tools-root "$RUNNER_TEMP/main-history-tools"
-      - name: Upload immutable commit bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: main-history-build-${{ matrix.id }}
-          path: artifacts
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 90
-
-  build:
-    name: "build ${{ matrix.id }}"
-    needs: [plan, build-first]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 240
-    env:
-      RUSTUP_TOOLCHAIN: ${{ needs.plan.outputs.rust-toolchain }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.plan.outputs.remaining-builds) }}
-    steps: *build-steps
-
   gate:
     name: Wait for the current measurement batch
-    needs: [plan, build]
+    needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
@@ -180,7 +109,7 @@ jobs:
 
   initial-a:
     name: "initial job ${{ matrix.job }} (${{ matrix.revision }}-${{ matrix.config }})"
-    needs: [plan, build, gate]
+    needs: [plan, gate]
     runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
     timeout-minutes: 360
     strategy:
@@ -195,14 +124,18 @@ jobs:
         with:
           job: ${{ matrix.job }}
           commit: ${{ matrix.revision }}
+          build-run: ${{ needs.plan.outputs.build-run }}
           valgrind-run: ${{ needs.plan.outputs.valgrind-run }}
           token: ${{ github.token }}
 
   validate-initial:
     name: Validate all 30 initial measurements
-    needs: initial-a
+    needs: [plan, initial-a]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUILD_RUN: ${{ needs.plan.outputs.build-run }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -211,11 +144,31 @@ jobs:
         with:
           pattern: main-history-capture-job-*
           path: initial-captures
+      - name: Retain successful round-zero C captures without remeasurement
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          plan = json.loads(Path("scripts/main-history-plan.json").read_text())
+          for job in plan["jobs"]:
+              if job["round"] != 0 or job["config"] != "C":
+                  continue
+              name = f"main-history-capture-job-{job['job']}"
+              subprocess.run([
+                  "gh", "run", "download", os.environ["BUILD_RUN"],
+                  "--repo", os.environ["GITHUB_REPOSITORY"],
+                  "--name", name, "--dir", f"retained-initial-captures/{name}",
+              ], check=True)
+          PY
       - name: Validate complete round zero
         run: |
           python3 scripts/main-history-validate.py \
             --plan scripts/main-history-plan.json \
             --input initial-captures \
+            --input retained-initial-captures \
             --rounds 1 \
             --output main-history-initial-validation.json
       - name: Retain initial validation
@@ -225,6 +178,14 @@ jobs:
           name: main-history-initial-validation
           path: main-history-initial-validation.json
           if-no-files-found: warn
+          retention-days: 90
+      - name: Preserve the reused initial captures
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: main-history-retained-initial-captures
+          path: retained-initial-captures
+          compression-level: 0
+          if-no-files-found: error
           retention-days: 90
 
   measure-a:
@@ -244,6 +205,7 @@ jobs:
         with:
           job: ${{ matrix.job }}
           commit: ${{ matrix.revision }}
+          build-run: ${{ needs.plan.outputs.build-run }}
           valgrind-run: ${{ needs.plan.outputs.valgrind-run }}
           token: ${{ github.token }}
 
@@ -264,5 +226,6 @@ jobs:
         with:
           job: ${{ matrix.job }}
           commit: ${{ matrix.revision }}
+          build-run: ${{ needs.plan.outputs.build-run }}
           valgrind-run: ${{ needs.plan.outputs.valgrind-run }}
           token: ${{ github.token }}

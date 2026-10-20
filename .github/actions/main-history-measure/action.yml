@@ -7,6 +7,9 @@ inputs:
   commit:
     description: Frozen commit ID selecting its immutable build bundle
     required: true
+  build-run:
+    description: Workflow run containing the frozen per-commit build bundles
+    required: true
   valgrind-run:
     description: Workflow run containing the frozen old and new Valgrind artifacts
     required: true
@@ -65,6 +68,8 @@ runs:
       with:
         name: main-history-build-${{ inputs.commit }}
         path: artifacts
+        github-token: ${{ inputs.token }}
+        run-id: ${{ inputs.build-run }}
     - name: Download both frozen Valgrind builds
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
@@ -81,6 +86,7 @@ runs:
         python3 scripts/main-history-capture.py \
           --plan scripts/main-history-plan.json \
           --artifacts "$STACK_ISOLATION_ARTIFACTS" \
+          --build-run '${{ inputs.build-run }}' \
           --output "$GITHUB_WORKSPACE/capture-out/job-$PLANNED_JOB" \
           --job "$PLANNED_JOB"
     - name: Preserve measurement evidence
