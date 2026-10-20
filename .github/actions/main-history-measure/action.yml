@@ -1,0 +1,94 @@
+name: Capture one main-history measurement
+description: Run one frozen commit/configuration suite and preserve its provenance and profiles.
+inputs:
+  job:
+    description: Job ID from the frozen main-history plan
+    required: true
+  commit:
+    description: Frozen commit ID selecting its immutable build bundle
+    required: true
+  valgrind-run:
+    description: Workflow run containing the frozen old and new Valgrind artifacts
+    required: true
+  token:
+    description: Read-only Actions token for cross-run artifact downloads
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Read frozen runner pins
+      id: pins
+      shell: bash
+      env:
+        PLANNED_JOB: ${{ inputs.job }}
+        PLANNED_COMMIT: ${{ inputs.commit }}
+      run: |
+        python3 - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        plan = json.loads(Path("scripts/main-history-plan.json").read_text())
+        job = int(os.environ["PLANNED_JOB"])
+        assert 0 <= job < len(plan["jobs"])
+        assert plan["jobs"][job]["job"] == job
+        assert plan["jobs"][job]["revision"] == os.environ["PLANNED_COMMIT"]
+        with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+            stream.write(f'version={plan["pins"]["runner_version"]}\n')
+            stream.write(f'checksum={plan["pins"]["runner_archive_sha256"]}\n')
+        PY
+    - name: Prepare the canonical workload location
+      shell: bash
+      run: |
+        sudo mkdir -p "$(dirname "$STACK_ISOLATION_WORKLOAD")"
+        sudo chown "$(id -u):$(id -g)" "$(dirname "$STACK_ISOLATION_WORKLOAD")"
+    - name: Install the pinned measurement runtime
+      shell: bash
+      env:
+        RUNNER_VERSION: ${{ steps.pins.outputs.version }}
+        RUNNER_CHECKSUM: ${{ steps.pins.outputs.checksum }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libc6-dbg zstd
+        curl -fsSL --retry 3 \
+          -o "$RUNNER_TEMP/codspeed-runner.tar.gz" \
+          "https://github.com/CodSpeedHQ/runner/releases/download/v${RUNNER_VERSION}/codspeed-runner-x86_64-unknown-linux-musl.tar.gz"
+        echo "${RUNNER_CHECKSUM}  $RUNNER_TEMP/codspeed-runner.tar.gz" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/codspeed-runner.tar.gz" -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/codspeed-runner-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/codspeed-runner-x86_64-unknown-linux-musl/codspeed" --version
+    - name: Install executor tools once
+      shell: bash
+      run: codspeed setup --mode simulation --setup-cache-dir "$RUNNER_TEMP/codspeed-setup"
+    - name: Download this commit's immutable build bundle
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: main-history-build-${{ inputs.commit }}
+        path: artifacts
+    - name: Download both frozen Valgrind builds
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        pattern: stack-isolation-valgrind-*
+        merge-multiple: true
+        path: artifacts
+        github-token: ${{ inputs.token }}
+        run-id: ${{ inputs.valgrind-run }}
+    - name: Capture the planned measurement
+      shell: bash
+      env:
+        PLANNED_JOB: ${{ inputs.job }}
+      run: |
+        python3 scripts/main-history-capture.py \
+          --plan scripts/main-history-plan.json \
+          --artifacts "$STACK_ISOLATION_ARTIFACTS" \
+          --output "$GITHUB_WORKSPACE/capture-out/job-$PLANNED_JOB" \
+          --job "$PLANNED_JOB"
+    - name: Preserve measurement evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: main-history-capture-job-${{ inputs.job }}
+        path: capture-out
+        compression-level: 0
+        if-no-files-found: warn
+        retention-days: 90

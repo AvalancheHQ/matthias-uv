@@ -1,0 +1,1254 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>__TITLE__</title>
+    <style>
+      :root {
+        --bg: #f7f8fa;
+        --panel: #fff;
+        --fg: #1c2128;
+        --muted: #59636e;
+        --line: #d0d7de;
+        --accent: #0969da;
+        --bad: #cf222e;
+        --warn: #9a6700;
+        --ok: #1a7f37;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #111418;
+          --panel: #1a1f26;
+          --fg: #e6edf3;
+          --muted: #9aa4af;
+          --line: #30363d;
+          --accent: #58a6ff;
+          --bad: #ff7b72;
+          --warn: #d29922;
+          --ok: #3fb950;
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          14px/1.45 system-ui,
+          sans-serif;
+      }
+      main {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 16px;
+      }
+      section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 12px 16px;
+        margin: 12px 0;
+      }
+      h1 {
+        font-size: 22px;
+        margin: 0 0 4px;
+      }
+      h2 {
+        font-size: 17px;
+        margin: 0 0 8px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .bad {
+        color: var(--bad);
+      }
+      .warn {
+        color: var(--warn);
+      }
+      .ok {
+        color: var(--ok);
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        margin: 8px 0;
+      }
+      select,
+      input,
+      button {
+        font: inherit;
+        color: var(--fg);
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 3px 6px;
+      }
+      input[type="search"] {
+        min-width: 320px;
+      }
+      button[aria-pressed="true"] {
+        background: var(--accent);
+        color: #fff;
+      }
+      .table-wrap {
+        overflow: auto;
+        max-height: 640px;
+        border: 1px solid var(--line);
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+      }
+      th,
+      td {
+        padding: 3px 8px;
+        border-bottom: 1px solid var(--line);
+        text-align: right;
+        white-space: nowrap;
+      }
+      th {
+        position: sticky;
+        top: 0;
+        background: var(--panel);
+        cursor: pointer;
+      }
+      th:first-child,
+      td:first-child {
+        text-align: left;
+      }
+      td.uri {
+        max-width: 560px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      td.na {
+        color: var(--muted);
+        font-style: italic;
+      }
+      td.absent {
+        background: repeating-linear-gradient(
+          45deg,
+          transparent 0 4px,
+          var(--line) 4px 5px
+        );
+        color: var(--muted);
+      }
+      td.zero {
+        outline: 2px solid var(--ok);
+        outline-offset: -2px;
+      }
+      td:focus-visible,
+      th:focus-visible,
+      button:focus-visible {
+        outline: 2px solid var(--accent);
+      }
+      svg {
+        width: 100%;
+        height: auto;
+        background: var(--panel);
+      }
+      .tag {
+        display: inline-block;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 0 6px;
+        margin: 1px;
+        font-size: 12px;
+      }
+      code {
+        font-size: 12px;
+      }
+      details {
+        margin: 4px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>__TITLE__</h1>
+      <p class="muted" id="subtitle"></p>
+      <section id="status" aria-live="polite"></section>
+      <section>
+        <h2>Scope</h2>
+        <div class="controls">
+          <label
+            >Environment cohort
+            <select id="cohort"></select
+          ></label>
+          <span role="group" aria-label="Configuration" id="configs"></span>
+        </div>
+        <p class="muted" id="cohort-note"></p>
+      </section>
+      <section>
+        <h2>Mean Simulation score trend by commit</h2>
+        <div class="controls">
+          <label
+            >Filter
+            <input
+              type="search"
+              id="trend-filter"
+              placeholder="substring of benchmark URI"
+          /></label>
+          <label
+            >Benchmark
+            <select id="trend-uri"></select
+          ></label>
+        </div>
+        <svg
+          id="trend"
+          role="img"
+          aria-label="Mean Simulation score per commit for configurations A, B and C"
+          viewBox="0 0 1200 360"
+        ></svg>
+        <p class="muted">
+          Lines are per-commit means; dots are individual runs. Scores are only
+          compared within one cohort. Repeated runs on one physical machine are
+          not independent CPUs; no run-level significance is claimed.
+        </p>
+        <details>
+          <summary>Raw observations for this benchmark and cohort</summary>
+          <div class="table-wrap"><table id="raw"></table></div>
+        </details>
+      </section>
+      <section>
+        <h2>Coefficient of variation heatmap</h2>
+        <p class="muted">
+          Cells show CV (sd/mean, n&minus;1) of the repeated runs for the
+          selected configuration. <b>n/a</b>: n&lt;2 or zero mean.
+          <b>0</b> (green outline): genuinely zero spread.
+          <b>&ndash;</b> hatched: not measured (tooltip says whether the case
+          exists at that commit). Commit headers mark changed benchmark files /
+          input fingerprints. Click a header to sort; click a cell for
+          drill-down.
+        </p>
+        <div class="controls">
+          <label>Search full URI <input type="search" id="heat-filter" /></label
+          ><span id="heat-count" class="muted"></span>
+        </div>
+        <div class="table-wrap"><table id="heat"></table></div>
+        <div id="drill" tabindex="-1" aria-live="polite"></div>
+      </section>
+      <section>
+        <h2>Comparisons and cost-term contributions</h2>
+        <p class="muted">
+          Contribution = 100 &times; term delta &divide; reference total mean
+          score (percentage points of the baseline total; positive = slower).
+          A&rarr;B is the Valgrind change.
+          <b
+            >B&rarr;C is integration + isolation combined, not an isolated
+            causal effect.</b
+          >
+        </p>
+        <div class="controls">
+          <label
+            >Comparison
+            <select id="cmp-kind"></select
+          ></label>
+          <label
+            >Pair
+            <select id="cmp-label"></select
+          ></label>
+          <span role="group" aria-label="Unit"
+            ><button id="unit-pp" aria-pressed="true">
+              pp of baseline total</button
+            ><button id="unit-time" aria-pressed="false">
+              time (seconds)
+            </button></span
+          >
+        </div>
+        <div class="table-wrap"><table id="cmp"></table></div>
+      </section>
+      <section>
+        <h2>Coverage</h2>
+        <div class="table-wrap"><table id="coverage"></table></div>
+      </section>
+      <section>
+        <h2>Benchmark inventories per commit</h2>
+        <div id="inventories"></div>
+      </section>
+      <section>
+        <h2>Provenance</h2>
+        <div id="provenance"></div>
+      </section>
+    </main>
+    <script type="application/json" id="report-data">
+      __DATA_JSON__
+    </script>
+    <script>
+      "use strict";
+      const D = JSON.parse(document.getElementById("report-data").textContent);
+      const $ = (id) => document.getElementById(id);
+      const state = {
+        cohort: Object.keys(D.cohorts)[0] || "",
+        config: "A",
+        unit: "pp",
+        sort: { col: -1, dir: 1 },
+      };
+      const TERMS = ["compute", "l1", "ll", "memory", "total"];
+      const COLORS = { A: "#0969da", B: "#bf8700", C: "#cf222e" };
+
+      function el(tag, props, ...kids) {
+        const node = document.createElement(tag);
+        for (const [k, v] of Object.entries(props || {})) {
+          if (k === "text") node.textContent = v;
+          else node.setAttribute(k, v);
+        }
+        for (const kid of kids) node.append(kid);
+        return node;
+      }
+      function fill(select, options, selected) {
+        select.replaceChildren(
+          ...options.map(([value, label]) => {
+            const o = el("option", { value, text: label });
+            o.selected = value === selected;
+            return o;
+          }),
+        );
+      }
+      const fmtScore = (v) =>
+        v === null || v === undefined ? "n/a" : v.toPrecision(6);
+      function fmtCv(c) {
+        if (c.n === 0) return "\u2013";
+        if (c.cv === null) return "n/a";
+        if (c.cv === 0) return "0";
+        return c.cv >= 0.001
+          ? (100 * c.cv).toFixed(3) + "%"
+          : (100 * c.cv).toExponential(2) + "%";
+      }
+      function cvTitle(uri, commit, c, inv) {
+        const head =
+          uri +
+          "\n" +
+          commit.id +
+          " " +
+          commit.sha.slice(0, 12) +
+          " (" +
+          commit.title +
+          ")";
+        if (c.n === 0)
+          return (
+            head +
+            "\nnot measured in this cohort/config" +
+            (inv
+              ? " (case exists in inventory)"
+              : " (case absent from commit inventory)")
+          );
+        return (
+          head +
+          "\nn=" +
+          c.n +
+          " mean=" +
+          fmtScore(c.mean) +
+          " s sd=" +
+          (c.sd === null ? "n/a" : c.sd.toPrecision(4)) +
+          " cv=" +
+          (c.cv === null
+            ? "unavailable" + (c.n < 2 ? " (n<2)" : " (zero mean)")
+            : c.cv.toPrecision(4))
+        );
+      }
+      function cvShade(c) {
+        if (c.n === 0 || c.cv === null) return "";
+        const t = Math.min(1, Math.sqrt(c.cv / 0.05));
+        return (
+          "background:color-mix(in srgb,var(--bad) " +
+          Math.round(t * 70) +
+          "%,transparent)"
+        );
+      }
+      const commitById = Object.fromEntries(D.commits.map((c) => [c.id, c]));
+      const inventoryOf = Object.fromEntries(
+        D.inventories.map((i) => [i.revision, i]),
+      );
+      function changeNote(i) {
+        const inv = D.inventories[i],
+          notes = [];
+        if (inv.added && inv.added.length)
+          notes.push("+" + inv.added.length + " cases");
+        if (inv.removed && inv.removed.length)
+          notes.push("-" + inv.removed.length + " cases");
+        for (const [key, label] of [
+          ["changed_benchmark_files", "bench files"],
+          ["changed_input_fingerprints", "input fingerprints"],
+        ]) {
+          const d = inv[key];
+          if (d) {
+            const n = d.added.length + d.removed.length + d.modified.length;
+            if (n) notes.push(n + " " + label + " changed");
+          }
+        }
+        if (!inv.measured) notes.push("not measured");
+        return notes;
+      }
+      function commitTitle(i) {
+        const c = D.commits[i],
+          n = changeNote(i);
+        return (
+          c.id +
+          " " +
+          c.sha +
+          "\n" +
+          c.title +
+          "\n" +
+          c.committed_at +
+          (n.length
+            ? "\nvs previous: " + n.join(", ")
+            : "\nvs previous: no recorded change")
+        );
+      }
+
+      function renderStatus() {
+        const cov = D.coverage;
+        $("subtitle").textContent =
+          D.experiment +
+          " \u2022 plan " +
+          D.plan_sha256.slice(0, 12) +
+          " \u2022 " +
+          D.plan.upstream_repository +
+          "@" +
+          D.plan.upstream_ref;
+        const box = $("status");
+        box.replaceChildren(
+          el("div", {
+            class: D.verdict === "valid" ? "ok" : "warn",
+            text:
+              "Verdict: " +
+              D.verdict +
+              " \u2014 " +
+              cov.successful_jobs +
+              " of " +
+              cov.expected_jobs +
+              " expected jobs (" +
+              cov.rounds +
+              " round(s)) with " +
+              D.observations.length +
+              " retained observations",
+          }),
+          ...D.errors.map((e) =>
+            el("div", { class: "bad", text: "error: " + e }),
+          ),
+          ...D.warnings.map((w) =>
+            el("div", { class: "warn", text: "warning: " + w }),
+          ),
+          ...(cov.missing_jobs.length
+            ? [
+                el("div", {
+                  class: "warn",
+                  text:
+                    cov.missing_jobs.length +
+                    " planned jobs have no successful measurement (see Coverage)",
+                }),
+              ]
+            : []),
+        );
+      }
+
+      function renderScope() {
+        fill(
+          $("cohort"),
+          Object.keys(D.cohorts).map((k) => [
+            k,
+            k +
+              " (" +
+              D.cohorts[k].jobs.length +
+              " jobs, " +
+              D.cohorts[k].machines.length +
+              " machine(s))",
+          ]),
+          state.cohort,
+        );
+        $("configs").replaceChildren(
+          ...D.plan.configs.map((c) => {
+            const b = el("button", {
+              text: "Config " + c,
+              "aria-pressed": String(c === state.config),
+            });
+            b.onclick = () => {
+              state.config = c;
+              renderScope();
+              renderHeat();
+              renderTrend();
+            };
+            return b;
+          }),
+        );
+        const cohort = D.cohorts[state.cohort];
+        $("cohort-note").textContent = cohort
+          ? "Cohort = CPU + kernel + glibc + full OS release + package list. Physical machines (hashed machine ids) in this cohort: " +
+            cohort.machines.map((m) => m.slice(0, 10)).join(", ") +
+            "."
+          : "";
+      }
+
+      function observationsFor(uri) {
+        return D.observations.filter(
+          (o) => o.cohort === state.cohort && o.uri === uri,
+        );
+      }
+      function renderTrendOptions() {
+        const rows = (D.heatmap[state.cohort] || {})[state.config] || [];
+        const q = $("trend-filter").value.toLowerCase();
+        const uris = [
+          ...new Set(
+            Object.values(D.heatmap[state.cohort] || {}).flatMap((r) =>
+              r.map((x) => x.uri),
+            ),
+          ),
+        ]
+          .filter((u) => u.toLowerCase().includes(q))
+          .sort();
+        fill(
+          $("trend-uri"),
+          uris.slice(0, 2000).map((u) => [u, u]),
+          $("trend-uri").value,
+        );
+        renderTrend();
+      }
+      function renderTrend() {
+        const uri = $("trend-uri").value,
+          svg = $("trend"),
+          W = 1200,
+          H = 360,
+          L = 80,
+          R = 20,
+          T = 20,
+          B = 50;
+        svg.replaceChildren();
+        const obs = uri ? observationsFor(uri) : [];
+        const NS = "http://www.w3.org/2000/svg";
+        const s = (tag, attrs, text) => {
+          const n = document.createElementNS(NS, tag);
+          for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+          if (text !== undefined) n.textContent = text;
+          return n;
+        };
+        if (!obs.length) {
+          svg.append(
+            s(
+              "text",
+              { x: 20, y: 40, fill: "currentColor" },
+              "No observations for this selection",
+            ),
+          );
+          return;
+        }
+        const ys = obs.map((o) => o.seconds),
+          lo = Math.min(...ys),
+          hi = Math.max(...ys),
+          pad = (hi - lo) * 0.1 || hi * 0.05 || 1;
+        const y0 = lo - pad,
+          y1 = hi + pad,
+          X = (i) => L + (i * (W - L - R)) / (D.commits.length - 1),
+          Y = (v) => T + ((y1 - v) * (H - T - B)) / (y1 - y0);
+        svg.append(
+          s("line", {
+            x1: L,
+            x2: W - R,
+            y1: H - B,
+            y2: H - B,
+            stroke: "var(--line)",
+          }),
+        );
+        for (let k = 0; k <= 4; k++) {
+          const v = y0 + ((y1 - y0) * k) / 4;
+          svg.append(
+            s(
+              "text",
+              {
+                x: L - 6,
+                y: Y(v) + 4,
+                "text-anchor": "end",
+                fill: "var(--muted)",
+                "font-size": 11,
+              },
+              v.toPrecision(5),
+            ),
+          );
+          svg.append(
+            s("line", {
+              x1: L,
+              x2: W - R,
+              y1: Y(v),
+              y2: Y(v),
+              stroke: "var(--line)",
+              "stroke-dasharray": "2 4",
+            }),
+          );
+        }
+        D.commits.forEach((c, i) => {
+          const t = s(
+            "text",
+            {
+              x: X(i),
+              y: H - B + 16,
+              "text-anchor": "middle",
+              fill: "currentColor",
+              "font-size": 11,
+            },
+            c.id + (changeNote(i).length ? " *" : ""),
+          );
+          t.append(s("title", {}, commitTitle(i)));
+          svg.append(t);
+        });
+        D.plan.configs.forEach((config, ci) => {
+          const pts = [];
+          D.commits.forEach((c, i) => {
+            const mine = obs.filter(
+              (o) => o.config === config && o.revision === c.id,
+            );
+            mine.forEach((o) => {
+              const dot = s("circle", {
+                cx: X(i) + (ci - 1) * 8,
+                cy: Y(o.seconds),
+                r: 2.5,
+                fill: COLORS[config],
+                opacity: 0.35,
+              });
+              dot.append(
+                s(
+                  "title",
+                  {},
+                  config +
+                    " " +
+                    c.id +
+                    " job " +
+                    o.job +
+                    " round " +
+                    o.round +
+                    ": " +
+                    fmtScore(o.seconds) +
+                    " s",
+                ),
+              );
+              svg.append(dot);
+            });
+            if (mine.length)
+              pts.push([
+                X(i),
+                Y(mine.reduce((a, o) => a + o.seconds, 0) / mine.length),
+                mine.length,
+                c,
+                mine,
+              ]);
+          });
+          svg.append(
+            s("polyline", {
+              points: pts.map((p) => p[0] + "," + p[1]).join(" "),
+              fill: "none",
+              stroke: COLORS[config],
+              "stroke-width": 2,
+            }),
+          );
+          pts.forEach((p) => {
+            const m = s("circle", {
+              cx: p[0],
+              cy: p[1],
+              r: 4.5,
+              fill: COLORS[config],
+            });
+            const mean = p[4].reduce((a, o) => a + o.seconds, 0) / p[2];
+            m.append(
+              s(
+                "title",
+                {},
+                config +
+                  " " +
+                  p[3].id +
+                  ": mean " +
+                  fmtScore(mean) +
+                  " s, n=" +
+                  p[2],
+              ),
+            );
+            svg.append(m);
+          });
+          svg.append(
+            s(
+              "text",
+              {
+                x: W - 80,
+                y: T + 14 * ci + 10,
+                fill: COLORS[config],
+                "font-size": 12,
+              },
+              "\u25CF " +
+                config +
+                (config === "C" ? " (integration+isolation)" : ""),
+            ),
+          );
+        });
+        const raw = $("raw");
+        raw.replaceChildren(
+          el(
+            "thead",
+            {},
+            el(
+              "tr",
+              {},
+              ...[
+                "job",
+                "round",
+                "order",
+                "config",
+                "commit",
+                "seconds",
+                "compute",
+                "l1",
+                "ll",
+                "memory",
+                "machine",
+                "started_at",
+              ].map((h) => el("th", { text: h })),
+            ),
+          ),
+          el(
+            "tbody",
+            {},
+            ...obs
+              .sort(
+                (a, b) =>
+                  a.commit_index - b.commit_index ||
+                  a.config.localeCompare(b.config) ||
+                  a.round - b.round,
+              )
+              .map((o) =>
+                el(
+                  "tr",
+                  {},
+                  ...[
+                    o.job,
+                    o.round,
+                    o.order,
+                    o.config,
+                    o.revision,
+                    o.seconds,
+                    ...["compute", "l1", "ll", "memory"].map((t) => o.terms[t]),
+                    o.machine_id.slice(0, 10),
+                    new Date(o.started_at * 1000).toISOString(),
+                  ].map((v) => el("td", { text: String(v) })),
+                ),
+              ),
+          ),
+        );
+      }
+
+      function renderHeat() {
+        const rows = (
+          (D.heatmap[state.cohort] || {})[state.config] || []
+        ).slice();
+        const q = $("heat-filter").value.toLowerCase();
+        let shown = rows.filter((r) => r.uri.toLowerCase().includes(q));
+        const { col, dir } = state.sort;
+        const key = (r) =>
+          col < 0
+            ? r.uri
+            : col === 100
+              ? Math.max(...r.cells.map((c) => c.n))
+              : r.cells[col].cv === null
+                ? -1
+                : r.cells[col].cv;
+        shown.sort((a, b) => {
+          const x = key(a),
+            y = key(b);
+          return (x < y ? -1 : x > y ? 1 : 0) * dir;
+        });
+        $("heat-count").textContent =
+          shown.length +
+          " of " +
+          rows.length +
+          " benchmarks (config " +
+          state.config +
+          ")";
+        const head = el(
+          "tr",
+          {},
+          el("th", {
+            text: "benchmark URI",
+            tabindex: 0,
+            title: "sort by URI",
+          }),
+          ...D.commits.map((c, i) => {
+            const th = el("th", {
+              text: c.id + (changeNote(i).length ? " *" : ""),
+              title: commitTitle(i),
+              tabindex: 0,
+            });
+            th.onclick = () => sortBy(i);
+            th.onkeydown = (e) => {
+              if (e.key === "Enter") sortBy(i);
+            };
+            return th;
+          }),
+          el("th", { text: "max n", tabindex: 0 }),
+        );
+        head.firstChild.onclick = () => sortBy(-1);
+        head.lastChild.onclick = () => sortBy(100);
+        const body = shown.map((r) =>
+          el(
+            "tr",
+            {},
+            el("td", { class: "uri", text: r.uri, title: r.uri }),
+            ...r.cells.map((c, i) => {
+              const inv = (inventoryOf[D.commits[i].id].uris || []).includes(
+                r.uri,
+              );
+              const cls =
+                c.n === 0
+                  ? "absent"
+                  : c.cv === null
+                    ? "na"
+                    : c.cv === 0
+                      ? "zero"
+                      : "";
+              const td = el("td", {
+                class: cls,
+                text: fmtCv(c) + (c.n ? " (n=" + c.n + ")" : ""),
+                title: cvTitle(r.uri, D.commits[i], c, inv),
+                tabindex: 0,
+                style: cvShade(c),
+                "aria-label":
+                  r.uri +
+                  " " +
+                  D.commits[i].id +
+                  " cv " +
+                  fmtCv(c) +
+                  " n " +
+                  c.n,
+              });
+              td.onclick = () => drill(r, i);
+              td.onkeydown = (e) => {
+                if (e.key === "Enter") drill(r, i);
+              };
+              return td;
+            }),
+            el("td", { text: String(Math.max(...r.cells.map((c) => c.n))) }),
+          ),
+        );
+        $("heat").replaceChildren(
+          el("thead", {}, head),
+          el("tbody", {}, ...body),
+        );
+      }
+      function sortBy(col) {
+        state.sort = {
+          col,
+          dir: state.sort.col === col ? -state.sort.dir : col < 0 ? 1 : -1,
+        };
+        renderHeat();
+      }
+      function drill(row, i) {
+        const c = D.commits[i],
+          cell = row.cells[i];
+        const obs = D.observations
+          .filter(
+            (o) =>
+              o.cohort === state.cohort &&
+              o.config === state.config &&
+              o.revision === c.id &&
+              o.uri === row.uri,
+          )
+          .sort((a, b) => a.round - b.round);
+        const box = $("drill");
+        box.replaceChildren(
+          el("h3", {
+            text: row.uri + " @ " + c.id + " config " + state.config,
+          }),
+          el("p", {
+            class: "muted",
+            text: cvTitle(
+              row.uri,
+              c,
+              cell,
+              (inventoryOf[c.id].uris || []).includes(row.uri),
+            ),
+          }),
+          el(
+            "div",
+            { class: "table-wrap" },
+            el(
+              "table",
+              {},
+              el(
+                "thead",
+                {},
+                el(
+                  "tr",
+                  {},
+                  ...["job", "round", "order", "seconds", "machine"].map((h) =>
+                    el("th", { text: h }),
+                  ),
+                ),
+              ),
+              el(
+                "tbody",
+                {},
+                ...obs.map((o) =>
+                  el(
+                    "tr",
+                    {},
+                    ...[
+                      o.job,
+                      o.round,
+                      o.order,
+                      o.seconds,
+                      o.machine_id.slice(0, 10),
+                    ].map((v) => el("td", { text: String(v) })),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        box.focus();
+      }
+
+      function renderComparisons() {
+        const all = D.comparisons[state.cohort] || [];
+        const kinds = [...new Set(all.map((e) => e.kind))];
+        const kind =
+          $("cmp-kind").value && kinds.includes($("cmp-kind").value)
+            ? $("cmp-kind").value
+            : kinds[0];
+        fill(
+          $("cmp-kind"),
+          kinds.map((k) => [
+            k,
+            k === "B->C"
+              ? "B\u2192C (integration + isolation)"
+              : k === "adjacent"
+                ? "adjacent commits"
+                : "A\u2192B (Valgrind)",
+          ]),
+          kind,
+        );
+        const labels = [
+          ...new Set(all.filter((e) => e.kind === kind).map((e) => e.label)),
+        ];
+        const label = labels.includes($("cmp-label").value)
+          ? $("cmp-label").value
+          : labels[0];
+        fill(
+          $("cmp-label"),
+          labels.map((l) => [l, l]),
+          label,
+        );
+        const rows = all.filter((e) => e.kind === kind && e.label === label);
+        const pp = state.unit === "pp";
+        const show = (e, t) => {
+          const v = pp ? e.pp[t] : e.delta_seconds[t];
+          return v === null
+            ? "unavailable"
+            : pp
+              ? v.toFixed(4) + " pp"
+              : v.toExponential(4) + " s";
+        };
+        const tip = (e, t) =>
+          (e.pp[t] === null
+            ? "pp unavailable (zero baseline)"
+            : e.pp[t].toFixed(6) + " pp") +
+          " | " +
+          e.delta_seconds[t].toExponential(6) +
+          " s | baseline total " +
+          e.reference_total.toExponential(6) +
+          " s | n " +
+          e.reference_n +
+          "\u2192" +
+          e.target_n;
+        const total = {};
+        for (const t of TERMS)
+          total[t] = rows.reduce((a, e) => a + e.delta_seconds[t], 0);
+        const refTotal = rows.reduce((a, e) => a + e.reference_total, 0);
+        const sumRow = el(
+          "tr",
+          {},
+          el("td", { text: "ALL common benchmarks (sum of means)" }),
+          ...TERMS.map((t) =>
+            el("td", {
+              text:
+                refTotal > 0
+                  ? pp
+                    ? ((100 * total[t]) / refTotal).toFixed(4) + " pp"
+                    : total[t].toExponential(4) + " s"
+                  : "unavailable",
+              title:
+                (refTotal > 0
+                  ? ((100 * total[t]) / refTotal).toFixed(6) + " pp"
+                  : "unavailable") +
+                " | " +
+                total[t].toExponential(6) +
+                " s | baseline total " +
+                refTotal.toExponential(6) +
+                " s",
+            }),
+          ),
+        );
+        $("cmp").replaceChildren(
+          el(
+            "thead",
+            {},
+            el(
+              "tr",
+              {},
+              ...["benchmark", ...TERMS].map((h) => el("th", { text: h })),
+            ),
+          ),
+          el(
+            "tbody",
+            {},
+            sumRow,
+            ...rows.map((e) =>
+              el(
+                "tr",
+                {},
+                el("td", { class: "uri", text: e.uri, title: e.uri }),
+                ...TERMS.map((t) =>
+                  el("td", { text: show(e, t), title: tip(e, t) }),
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
+      function renderCoverage() {
+        const cells = D.coverage.cells;
+        $("coverage").replaceChildren(
+          el(
+            "thead",
+            {},
+            el(
+              "tr",
+              {},
+              ...["commit", "A n", "B n", "C n", "expected per config"].map(
+                (h) => el("th", { text: h }),
+              ),
+            ),
+          ),
+          el(
+            "tbody",
+            {},
+            ...D.commits.map((c) => {
+              const mine = D.plan.configs.map((cf) =>
+                cells.find((x) => x.revision === c.id && x.config === cf),
+              );
+              return el(
+                "tr",
+                {},
+                el("td", {
+                  text: c.id + " " + c.sha.slice(0, 10) + " " + c.title,
+                  title: commitTitle(c.index),
+                }),
+                ...mine.map((m) =>
+                  el("td", {
+                    text: String(m.n),
+                    class: m.n < m.expected ? "warn" : "",
+                  }),
+                ),
+                el("td", { text: String(mine[0].expected) }),
+              );
+            }),
+          ),
+        );
+      }
+      function renderInventories() {
+        $("inventories").replaceChildren(
+          ...D.inventories.map((inv) => {
+            const c = commitById[inv.revision],
+              notes = changeNote(inv.commit_index);
+            const det = el(
+              "details",
+              {},
+              el("summary", {
+                text:
+                  c.id +
+                  " " +
+                  c.sha.slice(0, 10) +
+                  " \u2014 " +
+                  (inv.benchmark_count === null
+                    ? "not measured"
+                    : inv.benchmark_count + " benchmarks") +
+                  (notes.length ? " \u2014 " + notes.join(", ") : ""),
+              }),
+            );
+            for (const [label, list] of [
+              ["added", inv.added],
+              ["removed", inv.removed],
+            ])
+              if (list && list.length)
+                det.append(el("div", { text: label + ": " + list.join(", ") }));
+            for (const key of [
+              "changed_benchmark_files",
+              "changed_input_fingerprints",
+            ]) {
+              const d = inv[key];
+              if (d)
+                for (const kind of ["added", "removed", "modified"])
+                  if (d[kind].length)
+                    det.append(
+                      el("div", {
+                        text: key + " " + kind + ": " + d[kind].join(", "),
+                      }),
+                    );
+            }
+            det.append(
+              el("div", {
+                class: "muted",
+                text: (inv.uris || []).join("\n"),
+                style: "white-space:pre-wrap;font-size:12px",
+              }),
+            );
+            return det;
+          }),
+        );
+      }
+      function renderProvenance() {
+        const box = $("provenance");
+        const pins = D.plan.pins;
+        box.replaceChildren(
+          el("p", {
+            text:
+              "Commits: " +
+              D.plan.commit_selection +
+              "; frozen at " +
+              D.plan.frozen_at +
+              "; workload " +
+              D.plan.canonical_workload +
+              "; prerequisite workflow " +
+              D.plan.prerequisite_workflow_id +
+              "; Valgrind artifact workflow " +
+              D.plan.valgrind_artifact_workflow_id,
+          }),
+          el("p", { text: "Scheduling: " + D.plan.scheduling_note }),
+          el(
+            "details",
+            {},
+            el("summary", { text: "Pins" }),
+            el("pre", { text: JSON.stringify(pins, null, 2) }),
+          ),
+          ...Object.entries(D.cohorts).map(([k, v]) =>
+            el(
+              "details",
+              {},
+              el("summary", {
+                text:
+                  "Cohort " +
+                  k +
+                  " \u2014 " +
+                  v.jobs.length +
+                  " jobs, " +
+                  v.machines.length +
+                  " machine(s)",
+              }),
+              el("pre", { text: JSON.stringify(v.identity, null, 2) }),
+            ),
+          ),
+          ...Object.entries(D.machines).map(([k, v]) =>
+            el(
+              "details",
+              {},
+              el("summary", {
+                text:
+                  "Machine " +
+                  k.slice(0, 12) +
+                  " \u2014 " +
+                  v.jobs.length +
+                  " jobs, boots " +
+                  v.boot_ids.length,
+              }),
+              el("pre", { text: JSON.stringify(v, null, 2) }),
+            ),
+          ),
+          el(
+            "details",
+            {},
+            el("summary", { text: "Jobs (" + D.jobs.length + ")" }),
+            el(
+              "div",
+              { class: "table-wrap" },
+              el(
+                "table",
+                {},
+                el(
+                  "thead",
+                  {},
+                  el(
+                    "tr",
+                    {},
+                    ...[
+                      "job",
+                      "round",
+                      "order",
+                      "config",
+                      "commit",
+                      "cohort",
+                      "machine",
+                      "workflow run",
+                      "benchmarks",
+                      "started_at",
+                    ].map((h) => el("th", { text: h })),
+                  ),
+                ),
+                el(
+                  "tbody",
+                  {},
+                  ...D.jobs.map((j) =>
+                    el(
+                      "tr",
+                      {},
+                      ...[
+                        j.job,
+                        j.round,
+                        j.order,
+                        j.config,
+                        j.revision,
+                        j.cohort,
+                        j.machine_id.slice(0, 10),
+                        j.workflow_run_id,
+                        j.benchmark_count,
+                        new Date(j.started_at * 1000).toISOString(),
+                      ].map((v) => el("td", { text: String(v) })),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
+      $("cohort").onchange = (e) => {
+        state.cohort = e.target.value;
+        renderScope();
+        renderTrendOptions();
+        renderHeat();
+        renderComparisons();
+      };
+      $("trend-filter").oninput = renderTrendOptions;
+      $("trend-uri").onchange = renderTrend;
+      $("heat-filter").oninput = renderHeat;
+      $("cmp-kind").onchange = () => {
+        $("cmp-label").value = "";
+        renderComparisons();
+      };
+      $("cmp-label").onchange = renderComparisons;
+      for (const unit of ["pp", "time"])
+        $("unit-" + unit).onclick = () => {
+          state.unit = unit;
+          $("unit-pp").setAttribute("aria-pressed", String(unit === "pp"));
+          $("unit-time").setAttribute("aria-pressed", String(unit === "time"));
+          renderComparisons();
+        };
+      renderStatus();
+      renderScope();
+      renderTrendOptions();
+      renderHeat();
+      renderComparisons();
+      renderCoverage();
+      renderInventories();
+      renderProvenance();
+    </script>
+  </body>
+</html>

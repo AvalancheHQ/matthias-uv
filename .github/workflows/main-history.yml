@@ -1,0 +1,253 @@
+name: Main History ABC
+
+on:
+  push:
+    branches:
+      - ci/uv-main-history-20261020
+    paths:
+      - .github/workflows/main-history.yml
+      - .github/actions/main-history-measure/action.yml
+      - scripts/main-history-plan.json
+      - scripts/main-history-build.py
+      - scripts/main-history-capture.py
+      - scripts/main-history-validate.py
+
+permissions:
+  contents: read
+  actions: read
+  checks: read
+
+concurrency:
+  group: main-history-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  CARGO_TERM_COLOR: always
+  RUSTUP_MAX_RETRIES: "10"
+  UV_LOCKED: "1"
+  STACK_ISOLATION_ARTIFACTS: ${{ github.workspace }}/artifacts
+  STACK_ISOLATION_WORKLOAD: /home/runner/work/matthias-uv/matthias-uv/workload
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      builds: ${{ steps.plan.outputs.builds }}
+      initial: ${{ steps.plan.outputs.initial }}
+      remaining-a: ${{ steps.plan.outputs.remaining-a }}
+      remaining-b: ${{ steps.plan.outputs.remaining-b }}
+      prerequisite-run: ${{ steps.plan.outputs.prerequisite-run }}
+      valgrind-run: ${{ steps.plan.outputs.valgrind-run }}
+      rust-toolchain: ${{ steps.plan.outputs.rust-toolchain }}
+      uv-version: ${{ steps.plan.outputs.uv-version }}
+      uv-checksum: ${{ steps.plan.outputs.uv-checksum }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - id: plan
+        run: |
+          python3 - <<'PY'
+          import collections
+          import json
+          import os
+          from pathlib import Path
+
+          MATRIX_LIMIT = 256
+          REMAINING_PARTITIONS = 2
+          plan = json.loads(Path("scripts/main-history-plan.json").read_text())
+          commits = plan["commits"]
+          configs = plan["configs"]
+          jobs = plan["jobs"]
+          assert len(commits) == len({commit["sha"] for commit in commits}) == 10
+          assert configs == ["A", "B", "C"] and plan["repetitions"] == 10
+          assert [job["job"] for job in jobs] == list(range(300))
+          expected_cells = {(commit["id"], config) for commit in commits for config in configs}
+          for round_number in range(plan["repetitions"]):
+              selected = [job for job in jobs if job["round"] == round_number]
+              assert len(selected) == len(expected_cells)
+              assert {(job["revision"], job["config"]) for job in selected} == expected_cells
+              assert [job["order"] for job in selected] == list(range(len(expected_cells)))
+          assert set(collections.Counter((job["revision"], job["config"]) for job in jobs).values()) == {10}
+          commits_by_id = {commit["id"]: commit for commit in commits}
+          for job in jobs:
+              commit = commits_by_id[job["revision"]]
+              assert job["source_sha"] == commit["sha"] and job["commit_index"] == commit["index"]
+          matrix = lambda selected: [
+              {key: job[key] for key in ("job", "revision", "config")} for job in selected
+          ]
+          initial = matrix([job for job in jobs if job["round"] == 0])
+          remaining = matrix([job for job in jobs if job["round"] != 0])
+          split = (len(remaining) + REMAINING_PARTITIONS - 1) // REMAINING_PARTITIONS
+          matrices = {"initial": initial, "remaining-a": remaining[:split], "remaining-b": remaining[split:]}
+          assert all(0 < len(value) <= MATRIX_LIMIT for value in matrices.values())
+          assert sum(map(len, matrices.values())) == len(jobs)
+          outputs = {
+              **{key: json.dumps(value, separators=(",", ":")) for key, value in matrices.items()},
+              "builds": json.dumps(commits, separators=(",", ":")),
+              "prerequisite-run": plan["prerequisite_workflow_id"],
+              "valgrind-run": plan["valgrind_artifact_workflow_id"],
+              "rust-toolchain": plan["pins"]["rust_toolchain"],
+              "uv-version": plan["pins"]["uv_version"],
+              "uv-checksum": plan["pins"]["uv_archive_sha256"],
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+              for key, value in outputs.items():
+                  stream.write(f"{key}={value}\n")
+          PY
+
+  build:
+    name: "build ${{ matrix.id }}"
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      RUSTUP_TOOLCHAIN: ${{ needs.plan.outputs.rust-toolchain }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.builds) }}
+    steps:
+      - name: Checkout experiment
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Free build disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/aws-cli /usr/local/.ghcup /usr/share/swift \
+            /usr/lib/google-cloud-sdk /usr/local/go /usr/local/share/chromium
+          sudo apt-get clean
+          df -h /
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          version: ${{ needs.plan.outputs.uv-version }}
+          checksum: ${{ needs.plan.outputs.uv-checksum }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsasl2-dev libldap2-dev libkrb5-dev zstd
+      - name: Build frozen commit bundle
+        run: |
+          python3 scripts/main-history-build.py \
+            --plan scripts/main-history-plan.json \
+            --commit '${{ matrix.id }}' \
+            --artifacts "$STACK_ISOLATION_ARTIFACTS" \
+            --workload "$STACK_ISOLATION_WORKLOAD" \
+            --git-cache "$RUNNER_TEMP/git" \
+            --codspeed-source "$RUNNER_TEMP/codspeed-rust" \
+            --tools-root "$RUNNER_TEMP/main-history-tools"
+      - name: Upload immutable commit bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: main-history-build-${{ matrix.id }}
+          path: artifacts
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 90
+
+  gate:
+    name: Wait for the current measurement batch
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PREREQUISITE_RUN: ${{ needs.plan.outputs.prerequisite-run }}
+    steps:
+      - name: Require successful completion of the current experiment
+        run: gh run watch "$PREREQUISITE_RUN" --repo "$GITHUB_REPOSITORY" --interval 90 --exit-status
+
+  initial-a:
+    name: "initial job ${{ matrix.job }} (${{ matrix.revision }}-${{ matrix.config }})"
+    needs: [plan, build, gate]
+    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.initial) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/main-history-measure
+        with:
+          job: ${{ matrix.job }}
+          commit: ${{ matrix.revision }}
+          valgrind-run: ${{ needs.plan.outputs.valgrind-run }}
+          token: ${{ github.token }}
+
+  validate-initial:
+    name: Validate all 30 initial measurements
+    needs: initial-a
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: main-history-capture-job-*
+          path: initial-captures
+      - name: Validate complete round zero
+        run: |
+          python3 scripts/main-history-validate.py \
+            --plan scripts/main-history-plan.json \
+            --input initial-captures \
+            --rounds 1 \
+            --output main-history-initial-validation.json
+      - name: Retain initial validation
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: main-history-initial-validation
+          path: main-history-initial-validation.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  measure-a:
+    name: "measure job ${{ matrix.job }} (${{ matrix.revision }}-${{ matrix.config }})"
+    needs: [plan, validate-initial]
+    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.remaining-a) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/main-history-measure
+        with:
+          job: ${{ matrix.job }}
+          commit: ${{ matrix.revision }}
+          valgrind-run: ${{ needs.plan.outputs.valgrind-run }}
+          token: ${{ github.token }}
+
+  measure-b:
+    name: "measure job ${{ matrix.job }} (${{ matrix.revision }}-${{ matrix.config }})"
+    needs: [plan, validate-initial]
+    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.remaining-b) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/main-history-measure
+        with:
+          job: ${{ matrix.job }}
+          commit: ${{ matrix.revision }}
+          valgrind-run: ${{ needs.plan.outputs.valgrind-run }}
+          token: ${{ github.token }}
