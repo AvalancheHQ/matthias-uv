@@ -1,6 +1,6 @@
 {
   "candidate": {
-    "name": "baseline-config-C",
+    "name": "detshim-clock-random",
     "codspeed_rust_url": "https://github.com/CodSpeedHQ/codspeed-rust",
     "codspeed_rust_rev": "304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a",
     "valgrind_url": "https://github.com/CodSpeedHQ/valgrind-codspeed",
@@ -13,9 +13,17 @@
     ],
     "env_mode": "inherit",
     "env": {},
-    "wrapper": [],
+    "wrapper": [
+      "env",
+      "LD_PRELOAD=/home/runner/work/matthias-uv/matthias-uv/variance-lab/ci/detshim.so",
+      "DETSHIM=clock,random"
+    ],
     "runner_args": [],
-    "setup_commands": [],
+    "setup_commands": [
+      "command -v gcc >/dev/null || (sudo apt-get update && sudo apt-get install -y gcc libc6-dev)",
+      "gcc -O2 -shared -fPIC -o \"$VARIANCE_LAB_DIR/detshim.so\" \"$VARIANCE_LAB_DIR/detshim.c\" -ldl && sha256sum \"$VARIANCE_LAB_DIR/detshim.so\"",
+      "printf '#include <stdio.h>\\n#include <time.h>\\n#include <sys/random.h>\\nint main(){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);unsigned char r[4];getrandom(r,4,0);printf(\"%%ld.%%09ld %%02x%%02x%%02x%%02x\\\\n\",(long)t.tv_sec,t.tv_nsec,r[0],r[1],r[2],r[3]);return 0;}' > /tmp/detshim-probe.c && gcc -o /tmp/detshim-probe /tmp/detshim-probe.c && LD_PRELOAD=\"$VARIANCE_LAB_DIR/detshim.so\" DETSHIM=clock,random /tmp/detshim-probe | grep -q '^1000\\.0000' && echo shim-ok"
+    ],
     "required_benchmarks": [
       "install_wheel_many_files",
       "load_python_download_catalog",
@@ -59,5 +67,5 @@
     "name": "stack-isolation-valgrind-new",
     "mode": "reuse"
   },
-  "nonce": "20261020T220744Z"
+  "nonce": "20261020T225400Z"
 }
