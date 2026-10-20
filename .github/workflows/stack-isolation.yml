@@ -1,6 +1,6 @@
-# Frozen A/B/C Simulation top-up: 130 full-suite macro jobs.
-# Reuse the original 80 A/B runs to reach 35 observations per cell.
-# Two C preflights are excluded; all executable and Valgrind artifacts are reused.
+# Frozen A/B/C Simulation extension: 90 full-suite macro jobs.
+# Reuse the prior 210 A/B/C runs to reach 50 observations per cell.
+# All executable and Valgrind artifacts are reused without rebuilding.
 name: Stack Isolation
 
 on:
@@ -52,7 +52,7 @@ jobs:
         run: |
           plan=scripts/stack-isolation-plan.json
           jq -e '.phase == "build-preflight" or ((.phase == "preflight" or .phase == "measure") and (.build_run_id | test("^[0-9]+$")))' "$plan"
-          jq -e '.measurement_jobs == [range(80; 210)]' "$plan"
+          jq -e '.measurement_jobs == [range(210; 300)]' "$plan"
           {
             echo "phase=$(jq -r .phase "$plan")"
             echo "run-id=$(jq -r .build_run_id "$plan")"
@@ -216,7 +216,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # C base/head preflights are excluded from the 130-job measurement matrix.
+  # Optional C preflights are excluded from the 90-job measurement matrix.
   preflight:
     name: "preflight job ${{ matrix.job }}"
     needs: [plan, build, valgrind]
@@ -232,7 +232,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        job: [140, 175]
+        job: [270, 285]
     steps:
       - name: "Checkout experiment branch"
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

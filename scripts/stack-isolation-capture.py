@@ -28,8 +28,8 @@ VALGRIND_REVISIONS = {
 RUST_REVISION = "304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a"
 VALGRIND_PREFIX = Path("/opt/stack-isolation/valgrind")
 CELLS = [(config, revision) for config in "ABC" for revision in REVISIONS]
-RUNS_PER_CELL = 35
-REUSED_RUNS_PER_CONFIG = {"A": 20, "B": 20, "C": 0}
+RUNS_PER_CELL = 50
+REUSED_RUNS_PER_CONFIG = {"A": 35, "B": 35, "C": 35}
 FIRST_MEASUREMENT_JOB = sum(REUSED_RUNS_PER_CONFIG[config] for config, _ in CELLS)
 MEASUREMENTS = [
     (round_number, 0, config, revision)
@@ -240,8 +240,8 @@ def capture(args):
         valgrind = "old" if config == "A" else "new"
         manifest = {
             "schema_version": 1,
-            "experiment": "macro-abc35",
-            "batch": "top-up",
+            "experiment": "macro-abc50",
+            "batch": "extension-50",
             "job": args.job,
             "round": round_number,
             "order": position,
