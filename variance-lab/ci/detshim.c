@@ -187,12 +187,24 @@ int close(int fd) {
     return real(fd);
 }
 
+// Only threads requesting the Rust std default stack (2 MiB, set via
+// DETSHIM_CAP_STACK_SIZE) are counted against the cap; pools that choose their
+// own stack size (uv's rayon pool and CLI runtime use 4 MiB) are left alone.
+static int is_capped_thread(const pthread_attr_t *attr) {
+    size_t size = 0;
+    if (!attr || pthread_attr_getstacksize(attr, &size) != 0) return 0;
+    const char *spec = getenv("DETSHIM_CAP_STACK_SIZE");
+    size_t capped = spec && *spec ? (size_t)atoll(spec) : (size_t)2 * 1024 * 1024;
+    return size == capped;
+}
+
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start)(void *), void *arg) {
     static int (*real)(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *) = NULL;
     if (!real) real = dlsym(RTLD_NEXT, "pthread_create");
     init_features();
-    if (feature_threads && atomic_load(&threads_created) >= max_threads) return EAGAIN;
+    int capped = feature_threads && is_capped_thread(attr);
+    if (capped && atomic_load(&threads_created) >= max_threads) return EAGAIN;
     int rc = real(thread, attr, start, arg);
-    if (rc == 0) atomic_fetch_add(&threads_created, 1);
+    if (rc == 0 && capped) atomic_fetch_add(&threads_created, 1);
     return rc;
 }
