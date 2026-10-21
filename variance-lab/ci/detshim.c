@@ -1,13 +1,15 @@
-// LD_PRELOAD shim that removes two sources of run-to-run non-determinism from a
-// benchmarked process: wall/monotonic clocks and kernel entropy.
+// LD_PRELOAD shim that removes sources of run-to-run non-determinism from a
+// benchmarked process: wall/monotonic clocks, kernel entropy, thread-pool size.
 //
 // Features are selected with DETSHIM=<comma list>:
 //   clock   clock_gettime/gettimeofday/time return a virtual clock that starts at
 //           a fixed epoch and advances by DETSHIM_STEP_NS (default 1000) per call.
 //   random  getrandom/getentropy fill buffers from a fixed-seed xorshift stream;
 //           reads from /dev/urandom and /dev/random do the same.
-//
-// Build: gcc -O2 -shared -fPIC -o detshim.so detshim.c -ldl
+//   threads pthread_create succeeds only DETSHIM_MAX_THREADS times per process
+//           (default 1) and then fails with EAGAIN. tokio's blocking pool treats
+//           EAGAIN as temporary and runs the queued task on an existing worker,
+//           so the pool is pinned to that many threads.
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
@@ -21,6 +23,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #define FIXED_REALTIME_SEC 1792540800LL  /* 2026-10-21T00:00:00Z, after the frozen fixtures */
 #define FIXED_MONOTONIC_SEC 1000LL
@@ -28,7 +31,10 @@
 
 static int feature_clock = -1;
 static int feature_random = -1;
+static int feature_threads = -1;
 static long long step_ns = DEFAULT_STEP_NS;
+static long max_threads = 1;
+static _Atomic long threads_created = 0;
 static _Atomic long long ticks = 0;
 static _Atomic uint64_t rng_state = 0x9E3779B97F4A7C15ULL;
 static _Atomic int urandom_fd = -1;
@@ -36,14 +42,18 @@ static _Atomic int urandom_fd = -1;
 static void init_features(void) {
     if (feature_clock >= 0) return;
     const char *spec = getenv("DETSHIM");
-    int clock_on = 0, random_on = 0;
+    int clock_on = 0, random_on = 0, threads_on = 0;
     if (spec) {
         clock_on = strstr(spec, "clock") != NULL;
         random_on = strstr(spec, "random") != NULL;
+        threads_on = strstr(spec, "threads") != NULL;
     }
     const char *step = getenv("DETSHIM_STEP_NS");
     if (step && *step) step_ns = atoll(step);
+    const char *cap = getenv("DETSHIM_MAX_THREADS");
+    if (cap && *cap) max_threads = atol(cap);
     feature_random = random_on;
+    feature_threads = threads_on;
     feature_clock = clock_on;
 }
 
@@ -175,4 +185,14 @@ int close(int fd) {
     if (!real) real = dlsym(RTLD_NEXT, "close");
     if (fd >= 0 && fd == atomic_load(&urandom_fd)) atomic_store(&urandom_fd, -1);
     return real(fd);
+}
+
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start)(void *), void *arg) {
+    static int (*real)(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *) = NULL;
+    if (!real) real = dlsym(RTLD_NEXT, "pthread_create");
+    init_features();
+    if (feature_threads && atomic_load(&threads_created) >= max_threads) return EAGAIN;
+    int rc = real(thread, attr, start, arg);
+    if (rc == 0) atomic_fetch_add(&threads_created, 1);
+    return rc;
 }

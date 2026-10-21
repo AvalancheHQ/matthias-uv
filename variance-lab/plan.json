@@ -1,6 +1,6 @@
 {
   "candidate": {
-    "name": "random+nodecay+valgrind-sync-file-io",
+    "name": "random+nodecay+sync-file-io+1-blocking-thread",
     "codspeed_rust_url": "https://github.com/CodSpeedHQ/codspeed-rust",
     "codspeed_rust_rev": "304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a",
     "valgrind_url": "https://github.com/CodSpeedHQ/valgrind-codspeed",
@@ -14,20 +14,22 @@
     "env_mode": "inherit",
     "env": {
       "_RJEM_MALLOC_CONF": "dirty_decay_ms:-1,muzzy_decay_ms:-1",
-      "VALGRIND_OPTS": "--sync-file-io=yes --fair-sched=yes --scheduling-quantum=1000000000"
+      "VALGRIND_OPTS": "--sync-file-io=yes --fair-sched=yes --scheduling-quantum=1000000000",
+      "DETSHIM_MAX_THREADS": "1"
     },
     "wrapper": [
       "env",
       "LD_PRELOAD=$VARIANCE_LAB_DIR/detshim.so",
-      "DETSHIM=random"
+      "DETSHIM=random,threads"
     ],
     "runner_args": [],
     "setup_commands": [
       "command -v gcc >/dev/null || (sudo apt-get update && sudo apt-get install -y gcc libc6-dev)",
-      "gcc -O2 -shared -fPIC -o \"$VARIANCE_LAB_DIR/detshim.so\" \"$VARIANCE_LAB_DIR/detshim.c\" -ldl && sha256sum \"$VARIANCE_LAB_DIR/detshim.so\"",
+      "gcc -O2 -shared -fPIC -o \"$VARIANCE_LAB_DIR/detshim.so\" \"$VARIANCE_LAB_DIR/detshim.c\" -ldl -lpthread && sha256sum \"$VARIANCE_LAB_DIR/detshim.so\"",
       "printf '#include <stdio.h>\\n#include <sys/random.h>\\nint main(){unsigned char r[4];getrandom(r,4,0);printf(\"%%02x%%02x%%02x%%02x\\\\n\",r[0],r[1],r[2],r[3]);return 0;}' > /tmp/detshim-probe.c && gcc -o /tmp/detshim-probe /tmp/detshim-probe.c && a=$(LD_PRELOAD=\"$VARIANCE_LAB_DIR/detshim.so\" DETSHIM=random /tmp/detshim-probe) && b=$(LD_PRELOAD=\"$VARIANCE_LAB_DIR/detshim.so\" DETSHIM=random /tmp/detshim-probe) && [ \"$a\" = \"$b\" ] && echo shim-ok $a",
       "echo \"_RJEM_MALLOC_CONF=$_RJEM_MALLOC_CONF\"",
-      "valgrind --sync-file-io=yes --version && VALGRIND_OPTS=\"$VALGRIND_OPTS\" valgrind -q true && echo valgrind-opts-ok"
+      "valgrind --sync-file-io=yes --version && VALGRIND_OPTS=\"$VALGRIND_OPTS\" valgrind -q true && echo valgrind-opts-ok",
+      "printf '#include <pthread.h>\\n#include <stdio.h>\\nstatic void*f(void*a){return a;}\\nint main(){pthread_t t;int a=pthread_create(&t,0,f,0);if(!a)pthread_join(t,0);int b=pthread_create(&t,0,f,0);printf(\"%%d %%d\\\\n\",a,b);return 0;}' > /tmp/thr-probe.c && gcc -pthread -o /tmp/thr-probe /tmp/thr-probe.c && LD_PRELOAD=\"$VARIANCE_LAB_DIR/detshim.so\" DETSHIM=random,threads DETSHIM_MAX_THREADS=1 /tmp/thr-probe | grep -q '^0 11$' && echo threads-ok"
     ],
     "required_benchmarks": [
       "install_wheel_many_files",
@@ -71,7 +73,9 @@
     "mode": "reuse"
   },
   "valgrind": {
-    "mode": "build"
+    "run_id": "39539378893",
+    "name": "variance-lab-valgrind",
+    "mode": "reuse"
   },
-  "nonce": "20261021T033502Z"
+  "nonce": "20261021T040758Z"
 }
