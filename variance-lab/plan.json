@@ -1,6 +1,6 @@
 {
   "candidate": {
-    "name": "random-shim+jemalloc-nodecay",
+    "name": "random+nodecay+fair-sched",
     "codspeed_rust_url": "https://github.com/CodSpeedHQ/codspeed-rust",
     "codspeed_rust_rev": "304fa86cb8ecfd95cf6d0c1e4f05aae0f17da96a",
     "valgrind_url": "https://github.com/CodSpeedHQ/valgrind-codspeed",
@@ -20,7 +20,9 @@
       "LD_PRELOAD=$VARIANCE_LAB_DIR/detshim.so",
       "DETSHIM=random"
     ],
-    "runner_args": [],
+    "runner_args": [
+      "--experimental-fair-sched"
+    ],
     "setup_commands": [
       "command -v gcc >/dev/null || (sudo apt-get update && sudo apt-get install -y gcc libc6-dev)",
       "gcc -O2 -shared -fPIC -o \"$VARIANCE_LAB_DIR/detshim.so\" \"$VARIANCE_LAB_DIR/detshim.c\" -ldl && sha256sum \"$VARIANCE_LAB_DIR/detshim.so\"",
@@ -73,5 +75,5 @@
     "name": "stack-isolation-valgrind-new",
     "mode": "reuse"
   },
-  "nonce": "20261020T235319Z"
+  "nonce": "20261021T005010Z"
 }
